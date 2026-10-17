@@ -5,6 +5,9 @@ hw1/Dataset/
 *.zip
 *_HW1.txt
 
+Solr/server/logs/
+Solr/server/tmp/
+
 # 2. Python (快取與虛擬環境)
 __pycache__/
 *.py[cod]
