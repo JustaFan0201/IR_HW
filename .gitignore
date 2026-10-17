@@ -1,9 +1,10 @@
 Solr/server/logs/
 Solr/server/tmp/
 Solr/bin/*.port
-Solr/server/solr/hw1/data/
+Solr/server/solr/*/data/
 
 *.warc
+*HW*.txt
 __pycache__/
 *.py[cod]
 *$py.class

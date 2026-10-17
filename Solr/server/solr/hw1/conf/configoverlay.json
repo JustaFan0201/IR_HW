@@ -1,0 +1,9 @@
+{
+  "searchComponent":{"tvComponent":{
+      "name":"tvComponent",
+      "class":"solr.TermVectorComponent"}},
+  "requestHandler":{"/tvrh":{
+      "name":"/tvrh",
+      "class":"solr.SearchHandler",
+      "defaults":{"tv":"true"},
+      "last-components":["tvComponent"]}}}
