@@ -1,0 +1,15 @@
+Solr/server/logs/
+Solr/server/tmp/
+Solr/bin/*.port
+Solr/server/solr/hw1/data/
+
+*.warc
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+.vscode/
+.idea/
+Thumbs.db
