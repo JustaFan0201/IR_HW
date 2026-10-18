@@ -39,19 +39,28 @@ with open(warc_file, 'rb') as f:
         if line.startswith(b'WARC/0.') or line.startswith(b'WARC/1.'):
             if current_id and html_buffer:
                 try:
-                    # 將收集到的 HTML 行組合起來交給 BeautifulSoup 清理
+                    # 將收集到的 HTML 行組合起來交給 BeautifulSoup
                     raw_html = b''.join(html_buffer)
                     soup = BeautifulSoup(raw_html, 'html.parser')
-                    text_content = soup.get_text(separator=' ', strip=True)
                     
-                    if text_content:
+                    for script_or_style in soup(["script", "style", "meta", "noscript"]):
+                        script_or_style.decompose()
+                        
+                    # 提取純文字，並用空白取代原本的 HTML 標籤位置
+                    text_content = soup.get_text(separator=' ', strip=True)
+                    text_content = re.sub(r'[^a-zA-Z0-9\s]', ' ', text_content)
+                    
+                    # 確保清洗完之後還有內容 (去除前後多餘空白)
+                    clean_text = text_content.strip()
+                    
+                    if clean_text:
                         docs_batch.append({
                             "id": current_id,
-                            "content": text_content
+                            "content": clean_text
                         })
                         doc_count += 1
                         
-                        # 滿 500 筆送出一次
+                        # 滿 Batch Size 送出一次
                         if len(docs_batch) >= batch_size:
                             requests.post(solr_update_url, data=json.dumps(docs_batch), headers=headers)
                             print(f"已成功匯入 {doc_count} 筆文件...")
@@ -73,7 +82,6 @@ with open(warc_file, 'rb') as f:
         if is_recording_html:
             html_buffer.append(line)
 
-# 處理檔案結尾剩下的尾數資料
 if docs_batch:
     requests.post(solr_update_url, data=json.dumps(docs_batch), headers=headers)
     print(f"已成功匯入 {doc_count} 筆文件...")
