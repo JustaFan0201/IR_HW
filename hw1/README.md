@@ -61,9 +61,21 @@ python SourceCode/SetupSchema.py
 ```bash
 python SourceCode/IndexWarc.py
 ```
+(測試時可加數字只匯入前 N 篇，例如 `python SourceCode/IndexWarc.py 200`)
 
 **5.2 提取詞向量並匯出格式化索引：**
-執行完畢後，格式化完成的倒排索引檔案 (`HW1.txt`) 將自動產出並儲存於專案根目錄 (`hw1/`) 中。
+執行完畢後會在專案根目錄 (`hw1/`) 產出兩個檔案：
+- `HW1_dictionary.txt`：詞典檔，排序後的詞，一行一個。
+- `HW1.txt`：倒排索引，格式為 `term, df: <docID, tf: <pos1, pos2, ...>; ...>`。
 ```bash
 python SourceCode/ExportIndex.py
 ```
+
+---
+
+## 6. 補充說明
+
+* **文件 ID**：使用 WARC 標頭的 `WARC-TREC-ID` (例如 `clueweb09-en0000-02-00000`)。
+* **詞的位置**：由 0 開始計算；移除停用詞後，位置不會重新編號 (會留下空位)。
+* **斷詞**：使用 Solr 的 StandardTokenizer，標點符號會被切掉。
+* **Solr 記憶體**：預設只有 512 MB，匯入完整的 1 GB 資料前建議先調高。啟動前在 CMD 執行 `set SOLR_HEAP=2g`，再執行 `start_solr.bat`。

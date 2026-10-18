@@ -12,6 +12,11 @@ WARC_FILE_PATH = os.path.join(BASE_DIR, WARC_FILE_NAME)
 OUTPUT_FILE_NAME = "HW1.txt"
 OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
 
+DICTIONARY_FILE_PATH = os.path.join(BASE_DIR, "HW1_dictionary.txt")
+
+# 停用詞表 (Solr core 的 conf/ 底下，內含 35 個英文停用詞)
+STOPWORD_FILE = "lang/stopwords_en.txt"
+
 # 決定是否開啟「大小寫轉換」 (Case folding)
 ENABLE_CASE_FOLDING = True
 
