@@ -14,6 +14,10 @@ OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
 
 DICTIONARY_FILE_PATH = os.path.join(BASE_DIR, "HW1_dictionary.txt")
 
+# 附加 skip pointer 的索引 (選做加分項目，不影響上面的標準輸出)
+SKIP_FILE_PATH = os.path.join(BASE_DIR, "HW1_skip.txt")
+SKIP_MIN_DF = 16  # postings 太短的詞不放 skip pointer
+
 # 停用詞表 (Solr core 的 conf/ 底下，內含 35 個英文停用詞)
 STOPWORD_FILE = "lang/stopwords_en.txt"
 

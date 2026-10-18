@@ -71,6 +71,13 @@ python SourceCode/IndexWarc.py
 python SourceCode/ExportIndex.py
 ```
 
+**5.3 (選做) Skip pointer：**
+另外輸出附帶 skip pointer 的索引 `HW1_skip.txt`，並可做 AND 查詢比較比對次數 (詞要用索引裡的形式)：
+```bash
+python SourceCode/SkipPointer.py build
+python SourceCode/SkipPointer.py query download linux
+```
+
 ---
 
 ## 6. 補充說明
