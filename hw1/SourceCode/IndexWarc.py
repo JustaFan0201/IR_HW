@@ -1,4 +1,3 @@
-import re
 import sys
 import json
 import requests
@@ -32,7 +31,7 @@ def read_records(path):
 
 
 def html_to_text(block):
-    """去掉 HTTP 標頭，把 HTML 轉成純文字，並清掉亂碼 (只留英數字與空白)。"""
+    """去掉 HTTP 標頭，把 HTML 轉成純文字 (script / style / meta / noscript 不算內文)。標點交給 Solr 斷詞處理。"""
     _, sep, html = block.partition(b"\r\n\r\n")
     if not sep:  # 有些標頭是用 \n\n 結尾
         _, sep, html = block.partition(b"\n\n")
@@ -41,8 +40,7 @@ def html_to_text(block):
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "meta", "noscript"]):
         tag.decompose()
-    text = soup.get_text(separator=" ", strip=True)
-    return re.sub(r"[^a-zA-Z0-9\s]", " ", text).strip()
+    return soup.get_text(separator=" ", strip=True)
 
 
 def post_batch(batch):
