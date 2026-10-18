@@ -1,3 +1,4 @@
+import re
 import sys
 import json
 import requests
@@ -31,16 +32,17 @@ def read_records(path):
 
 
 def html_to_text(block):
-    """去掉 HTTP 標頭，把 HTML 轉成純文字 (script / style 不算內文)。"""
+    """去掉 HTTP 標頭，把 HTML 轉成純文字，並清掉亂碼 (只留英數字與空白)。"""
     _, sep, html = block.partition(b"\r\n\r\n")
     if not sep:  # 有些標頭是用 \n\n 結尾
         _, sep, html = block.partition(b"\n\n")
         if not sep:
             html = block
     soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style"]):
+    for tag in soup(["script", "style", "meta", "noscript"]):
         tag.decompose()
-    return soup.get_text(separator=" ", strip=True)
+    text = soup.get_text(separator=" ", strip=True)
+    return re.sub(r"[^a-zA-Z0-9\s]", " ", text).strip()
 
 
 def post_batch(batch):
