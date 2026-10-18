@@ -1,24 +1,46 @@
 import requests
 import json
-
-core_name = "hw1"
-schema_url = f"http://localhost:8983/solr/{core_name}/schema"
-
-payload = {
-    "add-field": {
-        "name": "content",
-        "type": "text_general", # 使用預設型態，內建基本分詞與大小寫轉換
-        "indexed": True,
-        "stored": True,
-        "termVectors": True,    # 紀錄詞向量
-        "termPositions": True   # 紀錄精確位置
-    }
-}
+from config import SOLR_BASE_URL
 
 headers = {"Content-type": "application/json"}
-response = requests.post(schema_url, data=json.dumps(payload), headers=headers)
+print("開始初始化 Solr 核心設定...")
 
-if response.status_code == 200:
-    print("Schema 設定成功！")
+print("\n[1/2] 正在建立 'content' 欄位與詞向量設定...")
+schema_url = f"{SOLR_BASE_URL}/schema"
+schema_payload = {
+    "add-field": {
+        "name": "content",
+        "type": "text_general", 
+        "indexed": True,
+        "stored": True,
+        "termVectors": True,    
+        "termPositions": True   
+    }
+}
+schema_response = requests.post(schema_url, data=json.dumps(schema_payload), headers=headers)
+if schema_response.status_code == 200:
+    print(" -> Schema 欄位設定成功！")
 else:
-    print("設定失敗：", response.text)
+    print(" -> Schema 設定失敗 (可能欄位已存在)：", schema_response.text)
+
+print("\n[2/2] 正在開啟 Term Vector 專屬查詢通道 (/tvrh)...")
+config_url = f"{SOLR_BASE_URL}/config"
+config_payload = {
+    "add-searchcomponent": {
+        "name": "tvComponent",
+        "class": "solr.TermVectorComponent"
+    },
+    "add-requesthandler": {
+        "name": "/tvrh",
+        "class": "solr.SearchHandler",
+        "defaults": { "tv": "true" },
+        "last-components": ["tvComponent"]
+    }
+}
+config_response = requests.post(config_url, data=json.dumps(config_payload), headers=headers)
+if config_response.status_code == 200:
+    print(" -> 成功開啟 Term Vector 查詢通道！")
+else:
+    print(" -> 通道設定失敗 (可能通道已存在)：", config_response.text)
+
+print("\n初始化作業完成！")

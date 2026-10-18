@@ -1,16 +1,20 @@
-import os
-import json
 import requests
-from bs4 import BeautifulSoup
+import json
 import re
+from bs4 import BeautifulSoup
+from config import WARC_FILE_PATH, SOLR_BASE_URL, BATCH_SIZE
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-warc_file = os.path.join(current_dir, '02.warc')
-
-solr_update_url = "http://localhost:8983/solr/hw1/update/json/docs?commit=true"
+warc_file = WARC_FILE_PATH
+solr_update_url = f"{SOLR_BASE_URL}/update/json/docs?commit=true"
 headers = {'Content-type': 'application/json'}
 
-batch_size = 500
+print("正在清空 Solr 舊有資料，確保索引乾淨...")
+delete_url = f"{SOLR_BASE_URL}/update?commit=true"
+delete_payload = {"delete": {"query": "*:*"}}
+requests.post(delete_url, json=delete_payload, headers=headers)
+print("舊資料已清空！")
+
+batch_size = BATCH_SIZE
 docs_batch = []
 doc_count = 0
 

@@ -1,15 +1,12 @@
 import requests
 import json
-import os
+from config import SOLR_BASE_URL, BATCH_SIZE, OUTPUT_FILE_PATH
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-output_file = os.path.join(current_dir, f"HW1.txt")
-solr_query_url = "http://localhost:8983/solr/hw1/tvrh"
+output_file = OUTPUT_FILE_PATH
+solr_query_url = f"{SOLR_BASE_URL}/tvrh"
 
 inverted_index = {}
-batch_size = 1000
 start = 0
-
 print("開始從 Solr 提取 Term Vectors 並轉換格式...")
 
 while True:
@@ -20,7 +17,7 @@ while True:
         "tv.fl": "content",
         "tv.tf": "true",
         "tv.positions": "true",
-        "rows": batch_size,
+        "rows": BATCH_SIZE,
         "start": start,
         "wt": "json"
     }
@@ -33,11 +30,9 @@ while True:
         
     term_vectors = response.get('termVectors', [])
     
-    # 解析 Solr 的交錯陣列結構
     for i in range(0, len(term_vectors), 2):
         doc_id = term_vectors[i]
         
-        # 避開 Solr 系統回傳的 metadata (如 "uniqueKeyFieldName", "warnings")
         if doc_id == "uniqueKeyFieldName" or doc_id == "warnings":
             continue
             
@@ -69,7 +64,7 @@ while True:
             inverted_index[term]["df"] += 1
             inverted_index[term]["postings"].append((doc_id, tf, positions))
             
-    start += batch_size
+    start += BATCH_SIZE
     print(f"已處理 {start} 筆文件的索引資料...")
 
 print("資料提取完畢，正在寫入 txt 檔案 (這可能會花一點時間，請耐心等候)...")
@@ -87,4 +82,4 @@ with open(output_file, "w", encoding="utf-8") as f:
         postings_str = "; ".join(postings_list)
         f.write(f"{term}, {df}: <{postings_str}>\n")
 
-print(f"大功告成！檔案已儲存至：{output_file}")
+print(f"檔案已儲存至：{output_file}")
