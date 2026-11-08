@@ -15,10 +15,15 @@ STOPWORDS = frozenset(
 )
 
 # 近似 Unicode UAX#29 (StandardTokenizer)：
-#   - 英數字連續段為一個 token；字母間可夾 ' . : ，數字間可夾 , .
-#   - 連字號、斜線等其他標點視為分隔 ("non-profit" -> non, profit)
-_ALNUM = r"[^\W_]+"
-_TOKEN_RE = re.compile(rf"{_ALNUM}(?:['’.:,]{_ALNUM})*|\w+")
+#   - 字母、數字、底線 (\w) 連續段為一個 token (user_id 整個保留)
+#   - 兩個字母之間可夾 ' ’ . : (don't、www.amazon.de)；兩個數字之間可夾 , . ; ' (3.14、1,000)
+#   - 連字號、斜線、@、字母間的逗號等其他標點視為分隔 ("non-profit" -> non, profit)
+_TOKEN_RE = re.compile(
+    r"(?:\w"
+    r"|(?<=[^\W\d_])['’.:](?=[^\W\d_])"
+    r"|(?<=\d)[,.;'’](?=\d)"
+    r")+"
+)
 
 # Lucene 的 PorterStemFilter 採用原始 Porter 演算法
 _stemmer = PorterStemmer(mode=PorterStemmer.ORIGINAL_ALGORITHM)
