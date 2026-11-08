@@ -47,7 +47,9 @@ python SourceCode/Search.py --queries queries.txt --output HW2.txt --top 100   #
 | 片語 | `"hong kong"` | 詞依序緊鄰出現 |
 | 鄰近 | `"hong kong"~5` | 所有詞在 5 個位置內，不限順序 |
 | 萬用字元 | `govern*`、`*ment`、`micro*soft` | `*` 代表任意長度字元 |
+| 子字串 (substring) | `*ernmen*` | 兩邊都放 `*`，找出詞中任何位置含有該字串的詞 |
 | 拼字校正 | `goverment` | 有可疑的詞時列出最多 3 個建議，輸入 `y` 套用第一個 |
+| 發音校正 | `smyth`、`mikrosoft` | 拼字建議不夠時，補上 Soundex 同音的詞，標示「(發音相近)」 |
 
 以上可以組合，例如 `"open source" AND linux`、`govern* AND NOT policy`。
 
@@ -60,6 +62,8 @@ python SourceCode/Search.py --queries queries.txt --output HW2.txt --top 100   #
 - 萬用字元樣式至少要有 2 個非 `*` 的字元；展開結果只保留 df 最高的 `WILDCARD_MAX_TERMS` 個詞，被截斷時會顯示說明。
 - 片語查詢只讀候選文件的位置資訊，不佔額外記憶體；停用詞留下的位置空位會保留，所以 `"united states of america"` 的 `of` 位置可由任何停用詞佔據。
 - 拼字檢查只處理至少 4 個字母的英文詞；詞不在索引中，或 df 很低 (<50) 且有 df 高 20 倍以上的相近詞時才會建議。
+- 發音校正用 Soundex (首字母加 3 位數字的發音代碼)：先列編輯距離近的拼字建議，不足 3 個時才補同音詞，並要求字形相似度至少 0.5，避免同代碼但不相干的詞。Soundex 只適合英文，且輸入只有文字 (沒有語音)；同音詞可能很多，所以只在查詢詞不在索引或 df 很低時才建議。
+- 子字串查詢 (`*abc*`) 要掃描整個詞典，約 0.15 秒；展開同樣受 `WILDCARD_MAX_TERMS` 限制，例如 `*soft*` 展開 531 個詞但只取 df 最高的 50 個。
 
 ## 5. 排序與輸出
 

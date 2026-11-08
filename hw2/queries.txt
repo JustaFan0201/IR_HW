@@ -13,3 +13,6 @@ goverment
 hong AND NOT kong
 govern*
 micro* AND soft*
+smyth
+mikrosoft
+*ernmen*

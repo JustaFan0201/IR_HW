@@ -19,6 +19,7 @@ doc_token_counts = {} # docID -> 文件在索引中的詞數 (BM25 的文件長�
 avg_doc_length = 0.0
 terms_by_length = {} # term length -> indexed terms
 sorted_terms = []   # 排序後的所有索引詞 (萬用字元前綴比對用 bisect)
+soundex_index = {}  # Soundex 代碼 -> 發音相近的索引詞 (發音校正用)
 champion_lists = {} # term -> [(docID, tf)]，只含 df 大於 champion 大小的詞 (--champion 才會建立)
 champion_state = {"weighting": None}  # champion list 是依哪個權重方案建立的
 term_offsets = {}   # term -> 該詞在索引檔中的位元組位置 (phrase/proximity 查詢時才回頭讀位置資訊)
@@ -62,6 +63,8 @@ def load_index():
             inverted_index[term] = {"df": df, "postings": postings_dict}
             term_offsets[term] = line_offset
             terms_by_length.setdefault(len(term), []).append(term)
+            if len(term) >= 4 and term.isascii() and term.isalpha():
+                soundex_index.setdefault(soundex(term), []).append(term)
 
     # 將所有平方和開根號，完成向量長度計算
     for doc_id in doc_lengths:
@@ -102,6 +105,45 @@ def _spelling_distance(first, second):
                 )
     return distances[-1][-1]
 
+_SOUNDEX_CODES = {
+    letter: digit
+    for digit, letters in {"1": "bfpv", "2": "cgjkqsxz", "3": "dt", "4": "l", "5": "mn", "6": "r"}.items()
+    for letter in letters
+}
+
+def soundex(word):
+    """標準 (American) Soundex：首字母 + 3 位數字，發音相近的英文詞代碼相同。
+    規則：相鄰且同代碼的字母只算一次；母音隔開的才重複計；h、w 不隔開。"""
+    word = word.lower()
+    digits = []
+    previous = _SOUNDEX_CODES.get(word[0], "")
+    for letter in word[1:]:
+        code = _SOUNDEX_CODES.get(letter, "")
+        if code and code != previous:
+            digits.append(code)
+        if letter not in "hw":
+            previous = code
+    return (word[0].upper() + "".join(digits) + "000")[:4]
+
+# 發音候選至少要和查詢詞有這麼像 (字形相似度)，避免同代碼但完全不相干的詞
+PHONETIC_MIN_RATIO = 0.5
+
+def _phonetic_matches(term, term_df, exclude, limit):
+    """與 term 同 Soundex 代碼的索引詞，依字形相似度、df 排序。"""
+    ranked = []
+    for candidate in soundex_index.get(soundex(term), ()):
+        if candidate == term or candidate in exclude:
+            continue
+        candidate_df = inverted_index[candidate]["df"]
+        # 查詢詞若在索引裡 (但 df 低)，候選詞 df 也要高很多倍才值得建議
+        if term_df and candidate_df < DF_RATIO * term_df:
+            continue
+        ratio = difflib.SequenceMatcher(None, term, candidate).ratio()
+        if ratio >= PHONETIC_MIN_RATIO:
+            ranked.append((-ratio, -candidate_df, candidate))
+    ranked.sort()
+    return [candidate for _, _, candidate in ranked[:limit]]
+
 # 索引只存詞幹，拼錯的字常常剛好還原成索引裡的雜訊詞 (例如 goverment -> gover, df=30)。
 # 所以 df 偏低的詞也視為可疑：若有編輯距離 1 且 df 高很多倍的詞，就提出建議。
 SUSPICIOUS_DF = 50
@@ -138,9 +180,25 @@ def suggest_spelling_corrections(query_terms):
         ]
         ranked_matches.sort()
         matches = [ranked[-1] for ranked in ranked_matches[:3]]
+
+        # 發音校正：字母差很多但唸起來像 (smyth / smith)，補在拼字建議後面 (總共最多 3 個)
+        if len(matches) < 3:
+            matches += _phonetic_matches(term, term_df, exclude=set(matches), limit=3 - len(matches))
         if matches:
             suggestions[term] = matches
     return suggestions
+
+def is_phonetic_suggestion(term, candidate):
+    """建議詞與查詢詞發音代碼相同 (用來在畫面上標示)。"""
+    return soundex(term) == soundex(candidate)
+
+def format_suggestions(term, matches):
+    """例如 'smyth -> myth, smith (發音相近)'。"""
+    shown = [
+        f"{candidate} (發音相近)" if is_phonetic_suggestion(term, candidate) else candidate
+        for candidate in matches
+    ]
+    return f"{term} -> {', '.join(shown)}"
 
 # 查詢語法 (運算式節點)：
 #   "term"                      -> 字串
@@ -537,7 +595,7 @@ def search(query, interactive=True, weighting=DEFAULT_WEIGHTING, use_champion=Fa
     if spelling_suggestions and interactive:
         print("拼字建議 (索引存的是詞幹，所以建議也是詞幹形式)：")
         for term, matches in spelling_suggestions.items():
-            print(f"  {term} -> {', '.join(matches)}")
+            print(f"  {format_suggestions(term, matches)}")
         use_suggestions = input("使用以上第一個建議替換查詢詞嗎？(y/N) ").strip().lower()
         if use_suggestions == "y":
             if boolean_expression is None:
@@ -580,7 +638,7 @@ def run_batch(queries_path, output_path, top_k, weighting=DEFAULT_WEIGHTING, use
             for note in notes:
                 out.write(f"# 萬用字元：{note}\n")
             for term, matches in suggestions.items():
-                out.write(f"# 拼字建議：{term} -> {', '.join(matches)}\n")
+                out.write(f"# 拼字建議：{format_suggestions(term, matches)}\n")
             if not results:
                 out.write("# 找不到符合的搜尋結果。\n")
             for doc_id, score in results[:top_k]:
