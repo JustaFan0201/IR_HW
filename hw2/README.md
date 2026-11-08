@@ -37,6 +37,15 @@ python SourceCode/Search.py --queries queries.txt --output HW2.txt --top 100   #
 | `--queries FILE` | 批次模式：查詢檔，每行一個查詢 |
 | `--output FILE` | 批次模式的輸出檔 |
 
+### 網頁介面 (選做加分)
+
+```bash
+python SourceCode/WebApp.py                 # 開啟 http://127.0.0.1:8000
+python SourceCode/WebApp.py --port 8080 --weighting bm25 --champion 1000
+```
+
+只用 Python 標準函式庫，不需額外套件。功能：搜尋框 (布林、片語、鄰近、萬用字元都可用)、權重方案與顯示筆數選單、拼字/發音建議 (點連結改用第一個建議)、結果摘要並**標示查詢詞**、點標題看全文 (同樣標示)。摘要與全文讀自 HW1 的 WARC 檔 (`config.py` 的 `WARC_FILE_PATH`，預設 `../hw1/02.warc`)；找不到該檔時仍可搜尋，只是沒有摘要。啟動後約 20 秒載入索引，WARC 在背景掃描 (數秒)。
+
 ## 4. 支援的查詢
 
 | 類型 | 範例 | 說明 |

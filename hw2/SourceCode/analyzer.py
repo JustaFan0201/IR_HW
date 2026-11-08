@@ -49,6 +49,16 @@ def analyze_positions(text):
     return items
 
 
+def token_spans(text):
+    """回傳 [(起, 迄, 詞幹或 None)]，保留每個 token 在原文的位置 (網頁介面標示查詢詞用)。
+    停用詞的詞幹為 None。"""
+    spans = []
+    for match in _TOKEN_RE.finditer(text):
+        token = match.group().lower()
+        spans.append((match.start(), match.end(), None if token in STOPWORDS else _stem(token)))
+    return spans
+
+
 def analyze(text):
     """回傳經過 切詞 -> 轉小寫 -> 去停用詞 -> 詞幹還原 的詞串列。"""
     return [term for term, _ in analyze_positions(text)]

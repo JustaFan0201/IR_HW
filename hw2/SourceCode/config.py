@@ -22,6 +22,9 @@ TOP_K = 10
 OUTPUT_FILE_NAME = "HW2.txt"
 OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
 
+# 網頁介面 (WebApp.py) 顯示摘要與全文用的 HW1 WARC 檔；找不到時網頁仍可搜尋，只是沒有摘要
+WARC_FILE_PATH = os.path.join(os.path.dirname(BASE_DIR), "hw1", "02.warc")
+
 # 預設權重/排序方案 (可用命令列 --weighting 覆蓋)：
 #   tfidf     : 作業指定公式 (1 + log tf) * log(N/df)，cosine similarity
 #   tfidf-raw : 原始 tf * log(N/df)，cosine similarity

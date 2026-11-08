@@ -571,13 +571,15 @@ def _rank_once(query_terms, allowed_doc_ids, weighting, use_champion):
     results.sort(key=lambda x: x[1], reverse=True)
     return results
 
-def search(query, interactive=True, weighting=DEFAULT_WEIGHTING, use_champion=False, top_k=TOP_K):
+def search(query, interactive=True, weighting=DEFAULT_WEIGHTING, use_champion=False, top_k=TOP_K,
+           apply_suggestions=False):
     """執行一個查詢，回傳 (results, spelling_suggestions, notes)；notes 是萬用字元展開說明。
 
     查詢格式錯誤或沒有可搜尋的詞時丟出 ValueError。
     interactive=True 時遇到拼字建議會詢問使用者是否替換；批次模式不替換，只回傳建議。
     use_champion=True 時用 champion list 近似計分 (需先 build_champion_lists)，
     結果不足 top_k 篇時自動退回精確計分。
+    apply_suggestions=True (給網頁介面用) 時不詢問，直接用第一個建議替換查詢詞。
     """
     # 查詢前處理與 HW1 索引一致 (StandardTokenizer -> 小寫 -> 停用詞 -> Porter 詞幹)
     query_terms = analyze(query)
@@ -592,12 +594,15 @@ def search(query, interactive=True, weighting=DEFAULT_WEIGHTING, use_champion=Fa
         else get_boolean_terms(boolean_expression, include_wildcard=False)
     )
     spelling_suggestions = suggest_spelling_corrections(spell_check_terms)
-    if spelling_suggestions and interactive:
-        print("拼字建議 (索引存的是詞幹，所以建議也是詞幹形式)：")
-        for term, matches in spelling_suggestions.items():
-            print(f"  {format_suggestions(term, matches)}")
-        use_suggestions = input("使用以上第一個建議替換查詢詞嗎？(y/N) ").strip().lower()
-        if use_suggestions == "y":
+    if spelling_suggestions and (interactive or apply_suggestions):
+        if interactive:
+            print("拼字建議 (索引存的是詞幹，所以建議也是詞幹形式)：")
+            for term, matches in spelling_suggestions.items():
+                print(f"  {format_suggestions(term, matches)}")
+            use_suggestions = input("使用以上第一個建議替換查詢詞嗎？(y/N) ").strip().lower() == "y"
+        else:
+            use_suggestions = True
+        if use_suggestions:
             if boolean_expression is None:
                 query_terms = [
                     spelling_suggestions[term][0] if term in spelling_suggestions else term
