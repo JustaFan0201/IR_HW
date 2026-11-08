@@ -15,3 +15,9 @@ INDEX_FILE_PATH = os.path.join(BASE_DIR, INDEX_FILE_NAME)
 # 總文件數 (N) - 用於計算 IDF: log(N/df)
 # 請填寫你在 HW1 實際成功匯入的總文件數量 (例如 10000 篇)
 TOTAL_DOCS = 35011
+# 預設顯示/輸出前幾名 (可用命令列 --top N 覆蓋)
+TOP_K = 10
+
+# 批次模式 (--queries) 的預設輸出檔 (hw2/HW2.txt)
+OUTPUT_FILE_NAME = "HW2.txt"
+OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)

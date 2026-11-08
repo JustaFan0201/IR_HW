@@ -1,9 +1,10 @@
+import argparse
 import difflib
 import math
 import os
 import re
 # 直接從同資料夾的 config.py 引入設定
-from config import INDEX_FILE_PATH, TOTAL_DOCS
+from config import INDEX_FILE_PATH, OUTPUT_FILE_PATH, TOP_K, TOTAL_DOCS
 from analyzer import analyze
 
 inverted_index = {} # term -> { "df": int, "postings": { docID: tf } }
@@ -221,62 +222,111 @@ def calculate_cosine_similarity(query_terms, allowed_doc_ids=None):
     results.sort(key=lambda x: x[1], reverse=True)
     return results
 
+def search(query, interactive=True):
+    """執行一個查詢，回傳 (results, spelling_suggestions)。
+
+    查詢格式錯誤或沒有可搜尋的詞時丟出 ValueError。
+    interactive=True 時遇到拼字建議會詢問使用者是否替換；批次模式不替換，只回傳建議。
+    """
+    # 查詢前處理與 HW1 索引一致 (StandardTokenizer -> 小寫 -> 停用詞 -> Porter 詞幹)
+    query_terms = analyze(query)
+    boolean_expression = parse_boolean_query(query)
+    if boolean_expression is not None:
+        query_terms = get_boolean_terms(boolean_expression)
+    if not query_terms:
+        raise ValueError("查詢只含停用詞或符號，沒有可搜尋的詞。")
+
+    spelling_suggestions = suggest_spelling_corrections(query_terms)
+    if spelling_suggestions and interactive:
+        print("拼字建議：")
+        for term, matches in spelling_suggestions.items():
+            print(f"  {term} -> {', '.join(matches)}")
+        use_suggestions = input("使用以上第一個建議替換查詢詞嗎？(y/N) ").strip().lower()
+        if use_suggestions == "y":
+            if boolean_expression is None:
+                query_terms = [
+                    spelling_suggestions[term][0] if term in spelling_suggestions else term
+                    for term in query_terms
+                ]
+            else:
+                boolean_expression = replace_boolean_terms(boolean_expression, spelling_suggestions)
+                query_terms = get_boolean_terms(boolean_expression)
+
+    allowed_doc_ids = (
+        evaluate_boolean_query(boolean_expression)
+        if boolean_expression is not None
+        else None
+    )
+    return calculate_cosine_similarity(query_terms, allowed_doc_ids), spelling_suggestions
+
+def run_batch(queries_path, output_path, top_k):
+    """讀查詢檔 (每行一個查詢)，把每個查詢的前 top_k 名寫入輸出檔。"""
+    with open(queries_path, "r", encoding="utf-8") as f:
+        queries = [line.strip() for line in f if line.strip()]
+
+    with open(output_path, "w", encoding="utf-8") as out:
+        for query in queries:
+            out.write(f"Query: {query}\n")
+            try:
+                results, suggestions = search(query, interactive=False)
+            except ValueError as error:
+                out.write(f"# 錯誤：{error}\n\n")
+                continue
+            for term, matches in suggestions.items():
+                out.write(f"# 拼字建議：{term} -> {', '.join(matches)}\n")
+            if not results:
+                out.write("# 找不到符合的搜尋結果。\n")
+            for doc_id, score in results[:top_k]:
+                out.write(f"{doc_id}\t{score:.6f}\n")
+            out.write("\n")
+            print(f"{query!r}: 命中 {len(results)} 篇，輸出前 {min(top_k, len(results))} 名")
+    print(f"完成！結果已寫入 {output_path}")
+
+def positive_int(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("必須是大於 0 的整數")
+    return number
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="IR HW2: 向量空間模型搜尋 (TF-IDF + cosine similarity)")
+    parser.add_argument("--top", type=positive_int, default=TOP_K,
+                        help=f"顯示/輸出前 N 名 (預設 {TOP_K}，可在 config.py 的 TOP_K 修改)")
+    parser.add_argument("--queries", metavar="FILE",
+                        help="批次模式：查詢檔，每行一個查詢；結果寫入輸出檔")
+    parser.add_argument("--output", metavar="FILE", default=OUTPUT_FILE_PATH,
+                        help=f"批次模式的輸出檔 (預設 {OUTPUT_FILE_PATH})")
+    args = parser.parse_args()
+
     load_index()
+
+    if args.queries:
+        run_batch(args.queries, args.output, args.top)
+        raise SystemExit(0)
+
     print("==================================================")
     print(" 歡迎使用 IR Homework 2: 查詢處理與搜尋系統")
-    print(" 輸入 'exit' 離開程式")
+    print(f" 每次顯示前 {args.top} 名；輸入 'exit' 離開程式")
     print("==================================================")
-    
+
     while True:
         query = input("\ncmd> ")
-        if query.lower() == "exit": 
+        if query.lower() == "exit":
             break
         if not query.strip():
             continue
-            
-        # 查詢前處理與 HW1 索引一致 (StandardTokenizer -> 小寫 -> 停用詞 -> Porter 詞幹)
-        query_terms = analyze(query)
+
         try:
-            boolean_expression = parse_boolean_query(query)
+            results, _ = search(query)
         except ValueError as error:
-            print(f"布林查詢格式錯誤：{error}")
-            continue
-        if boolean_expression is not None:
-            query_terms = get_boolean_terms(boolean_expression)
-
-        if not query_terms:
-            print("查詢只含停用詞或符號，沒有可搜尋的詞。")
+            print(f"查詢錯誤：{error}")
             continue
 
-        spelling_suggestions = suggest_spelling_corrections(query_terms)
-        if spelling_suggestions:
-            print("拼字建議：")
-            for term, matches in spelling_suggestions.items():
-                print(f"  {term} -> {', '.join(matches)}")
-            use_suggestions = input("使用以上第一個建議替換查詢詞嗎？(y/N) ").strip().lower()
-            if use_suggestions == "y":
-                if boolean_expression is None:
-                    query_terms = [
-                        spelling_suggestions[term][0] if term in spelling_suggestions else term
-                        for term in query_terms
-                    ]
-                else:
-                    boolean_expression = replace_boolean_terms(boolean_expression, spelling_suggestions)
-                    query_terms = get_boolean_terms(boolean_expression)
-        
-        allowed_doc_ids = (
-            evaluate_boolean_query(boolean_expression)
-            if boolean_expression is not None
-            else None
-        )
-        results = calculate_cosine_similarity(query_terms, allowed_doc_ids)
-        
         if not results:
             print("找不到符合的搜尋結果。")
             continue
-            
+
         print("Ranked Search Results:")
         print("<doc#> \t\t <similarity score>")
-        for rank, (doc_id, score) in enumerate(results[:10]): 
+        for doc_id, score in results[:args.top]:
             print(f"{doc_id} \t {score:.6f}")

@@ -41,14 +41,19 @@ python SourceCode/Search.py
 - **拼字校正 (Spell correction)**：查詢詞不在索引中時會列出最多 3 個候選詞，輸入 `y` 使用第一個建議，只檢查至少 4 個字母的英文詞
 - **布林運算子搜尋 (Boolean operators search)**：支援 `AND`、`OR` 及括號，例如 `hong AND kong`、`hong OR kong`、`(arc OR zip) AND stop`。查詢含有 Boolean 運算子或括號時，未寫運算子的相鄰詞視為 `AND`，且 `AND` 優先於 `OR`。
 
-**4.3 輸出格式：**
-系統將採用 **向量空間模型 (Vector Space Model)** 進行排序，並回傳前 10 名的搜尋結果 (Top-10 Ranking)，輸出格式嚴格遵守作業規範：
-`<doc#>    <similarity score>` (例如：`urn:uuid:xxx    0.872350`)
+**4.3 輸出格式與前 N 名 (`--top`)：**
+系統採用 **向量空間模型 (Vector Space Model)** 排序，輸出格式遵守作業規範：
+`<doc#>    <similarity score>` (例如：`clueweb09-en0000-02-12984    0.176598`)
 
-輸入 `exit` 即可安全關閉系統。
-
-**4.4 執行測試：**
-在專案根目錄執行以下指令，驗證 Boolean 查詢剖析、文件集合運算、錯誤語法處理，以及結果篩選：
+用 `--top N` 決定顯示/輸出前 N 名 (預設 10，可在 `config.py` 的 `TOP_K` 修改)：
 ```bash
-python -m unittest discover -s SourceCode -p "test_*.py" -v
+python SourceCode/Search.py --top 20
 ```
+互動模式輸入 `exit` 即可安全關閉系統。
+
+**4.3.1 批次模式與輸出檔：**
+給一個查詢檔 (每行一個查詢，範例見 `queries.txt`)，結果寫入輸出檔 (預設 `HW2.txt`，可用 `--output` 或 `config.py` 修改)：
+```bash
+python SourceCode/Search.py --queries queries.txt --output HW2.txt --top 100
+```
+輸出檔每個查詢一段，`Query:` 開頭，接著 `<doc#>` 與分數 (以 Tab 分隔)；`#` 開頭的行是註解 (錯誤訊息、拼字建議)。批次模式不會詢問拼字替換，只把建議寫成註解。
