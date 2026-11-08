@@ -36,10 +36,17 @@ python SourceCode/Search.py
 啟動後，您可以在終端機的 `cmd>` 提示字元輸入以下查詢類型：
 - **單一關鍵字 (Single keywords)**：例如 `airplanes`
 - **自由文本 (Free texts)**：例如 `United States government`
-- **布林搜尋 (Boolean search)**：*(若有整合 Skip Pointer 加分項可於此註明，例如支援 `AND` / `OR` 運算)*
+- **拼字校正 (Spell correction)**：查詢詞不在索引中時會列出最多 3 個候選詞，輸入 `y` 使用第一個建議，只檢查至少 4 個字母的英文詞
+- **布林運算子搜尋 (Boolean operators search)**：支援 `AND`、`OR` 及括號，例如 `hong AND kong`、`hong OR kong`、`(arc OR zip) AND stop`。查詢含有 Boolean 運算子或括號時，未寫運算子的相鄰詞視為 `AND`，且 `AND` 優先於 `OR`。
 
 **4.3 輸出格式：**
 系統將採用 **向量空間模型 (Vector Space Model)** 進行排序，並回傳前 10 名的搜尋結果 (Top-10 Ranking)，輸出格式嚴格遵守作業規範：
 `<doc#>    <similarity score>` (例如：`urn:uuid:xxx    0.872350`)
 
 輸入 `exit` 即可安全關閉系統。
+
+**4.4 執行測試：**
+在專案根目錄執行以下指令，驗證 Boolean 查詢剖析、文件集合運算、錯誤語法處理，以及結果篩選：
+```bash
+python -m unittest discover -s SourceCode -p "test_*.py" -v
+```
