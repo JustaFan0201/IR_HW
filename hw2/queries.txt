@@ -11,3 +11,5 @@ goverment
 "hong kong"~5
 "open source" AND linux
 hong AND NOT kong
+govern*
+micro* AND soft*

@@ -4,8 +4,9 @@ import math
 import os
 import re
 # 直接從同資料夾的 config.py 引入設定
+from bisect import bisect_left
 from config import (BM25_B, BM25_K1, DEFAULT_WEIGHTING, INDEX_FILE_PATH,
-                    OUTPUT_FILE_PATH, TOP_K, TOTAL_DOCS)
+                    OUTPUT_FILE_PATH, TOP_K, TOTAL_DOCS, WILDCARD_MAX_TERMS)
 from analyzer import analyze, analyze_positions
 
 WEIGHTING_SCHEMES = ("tfidf", "tfidf-raw", "bm25")
@@ -16,6 +17,7 @@ doc_lengths_raw = {} # docID -> float (tfidf-raw 方案的文件向量長度)
 doc_token_counts = {} # docID -> 文件在索引中的詞數 (BM25 的文件長度)
 avg_doc_length = 0.0
 terms_by_length = {} # term length -> indexed terms
+sorted_terms = []   # 排序後的所有索引詞 (萬用字元前綴比對用 bisect)
 term_offsets = {}   # term -> 該詞在索引檔中的位元組位置 (phrase/proximity 查詢時才回頭讀位置資訊)
 
 def load_index():
@@ -65,6 +67,7 @@ def load_index():
 
     global avg_doc_length
     avg_doc_length = sum(doc_token_counts.values()) / len(doc_token_counts)
+    sorted_terms.extend(sorted(inverted_index))
     print("索引載入完成！")
 
 def _spelling_distance(first, second):
@@ -149,6 +152,28 @@ def _is_and(token):
 def _is_or(token):
     return token.lower() == "or"
 
+def expand_wildcard(pattern):
+    """把含 * 的樣式展開成索引裡符合的詞，回傳 (詞清單, 符合總數)。
+
+    索引存的是詞幹，所以樣式只轉小寫、不做詞幹還原 (govern* 會比對 govern、governor ...)。
+    清單依 df 由高到低，最多保留 WILDCARD_MAX_TERMS 個。
+    """
+    pattern = pattern.lower()
+    if len(pattern.replace("*", "")) < 2:
+        raise ValueError(f"萬用字元樣式太寬：{pattern}（至少要有 2 個非 * 的字元）")
+    regex = re.compile(".*".join(re.escape(part) for part in pattern.split("*")))
+
+    prefix = pattern.split("*", 1)[0]
+    if prefix:  # 有固定前綴：用二分搜尋縮小範圍
+        low = bisect_left(sorted_terms, prefix)
+        high = bisect_left(sorted_terms, prefix + "￿")
+        candidates = sorted_terms[low:high]
+    else:       # 以 * 開頭：只能掃全部詞典
+        candidates = sorted_terms
+    matches = [term for term in candidates if regex.fullmatch(term)]
+    matches.sort(key=lambda term: (-inverted_index[term]["df"], term))
+    return matches[:WILDCARD_MAX_TERMS], len(matches)
+
 def parse_boolean_query(query):
     if query.count('"') % 2:
         raise ValueError("引號不成對。")
@@ -156,7 +181,7 @@ def parse_boolean_query(query):
     tokens = re.findall(r'"[^"]*"(?:~\d+)?|\(|\)|[^\s()"]+', query)
     # NOT 只認大寫，避免把一般英文的 not (停用詞) 誤判成運算子
     if not any(
-        _is_and(t) or _is_or(t) or t in {"NOT", "(", ")"} or t.startswith('"')
+        _is_and(t) or _is_or(t) or t in {"NOT", "(", ")"} or t.startswith('"') or "*" in t
         for t in tokens
     ):
         return None
@@ -193,6 +218,9 @@ def parse_boolean_query(query):
             if len(items) == 1:
                 return items[0][0]
             return ("phrase", tuple(items), slop)
+        if "*" in token:
+            terms, total = expand_wildcard(token)
+            return ("wild", token.lower(), tuple(terms), total)
         # 與 HW1 索引相同的分析鏈：切詞/小寫/停用詞/詞幹；停用詞回傳 None，多詞 (如 non-profit) 視為 AND
         expression = None
         for term in analyze(token):
@@ -231,19 +259,41 @@ def parse_boolean_query(query):
         raise ValueError("布林查詢只含停用詞，沒有可搜尋的詞。")
     return expression
 
-def get_boolean_terms(expression):
-    """取出參與計分的正向詞 (NOT 底下的詞不計分)。"""
+def get_boolean_terms(expression, include_wildcard=True):
+    """取出參與計分的正向詞 (NOT 底下的詞不計分)。
+    include_wildcard=False 時排除萬用字元展開的詞 (它們不需要拼字檢查)。"""
     if isinstance(expression, str):
         return [expression]
     if expression[0] == "phrase":
         return [term for term, _ in expression[1]]
+    if expression[0] == "wild":
+        return list(expression[2]) if include_wildcard else []
     if expression[0] == "not":
         return []
-    return get_boolean_terms(expression[1]) + get_boolean_terms(expression[2])
+    return (get_boolean_terms(expression[1], include_wildcard)
+            + get_boolean_terms(expression[2], include_wildcard))
+
+def get_wildcard_notes(expression):
+    """萬用字元展開的說明 (展開詞數、是否被截斷)，給使用者看。"""
+    if isinstance(expression, str):
+        return []
+    if expression[0] == "wild":
+        _, pattern, terms, total = expression
+        note = f"{pattern} 展開為 {total} 個索引詞"
+        if total > len(terms):
+            note += f"（只取 df 最高的 {len(terms)} 個）"
+        return [note]
+    if expression[0] == "phrase":
+        return []
+    if expression[0] == "not":
+        return get_wildcard_notes(expression[1])
+    return get_wildcard_notes(expression[1]) + get_wildcard_notes(expression[2])
 
 def replace_boolean_terms(expression, suggestions):
     if isinstance(expression, str):
         return suggestions.get(expression, [expression])[0]
+    if expression[0] == "wild":
+        return expression
     if expression[0] == "phrase":
         items = tuple(
             (suggestions.get(term, [term])[0], offset) for term, offset in expression[1]
@@ -334,6 +384,11 @@ def evaluate_boolean_query(expression):
         return set(inverted_index.get(expression, {}).get("postings", {}))
     if expression[0] == "phrase":
         return evaluate_phrase(expression[1], expression[2])
+    if expression[0] == "wild":
+        matched = set()
+        for term in expression[2]:
+            matched |= set(inverted_index[term]["postings"])
+        return matched
     if expression[0] == "not":
         return set(doc_lengths) - evaluate_boolean_query(expression[1])
 
@@ -409,7 +464,7 @@ def rank_documents(query_terms, allowed_doc_ids=None, weighting=DEFAULT_WEIGHTIN
     return results
 
 def search(query, interactive=True, weighting=DEFAULT_WEIGHTING):
-    """執行一個查詢，回傳 (results, spelling_suggestions)。
+    """執行一個查詢，回傳 (results, spelling_suggestions, notes)；notes 是萬用字元展開說明。
 
     查詢格式錯誤或沒有可搜尋的詞時丟出 ValueError。
     interactive=True 時遇到拼字建議會詢問使用者是否替換；批次模式不替換，只回傳建議。
@@ -420,9 +475,13 @@ def search(query, interactive=True, weighting=DEFAULT_WEIGHTING):
     if boolean_expression is not None:
         query_terms = get_boolean_terms(boolean_expression)
     if not query_terms:
-        raise ValueError("沒有可計分的正向搜尋詞 (查詢只含停用詞、符號，或只有 NOT)。")
+        raise ValueError("沒有可計分的正向搜尋詞 (查詢只含停用詞、符號、只有 NOT，或萬用字元沒有符合的詞)。")
 
-    spelling_suggestions = suggest_spelling_corrections(query_terms)
+    spell_check_terms = (
+        query_terms if boolean_expression is None
+        else get_boolean_terms(boolean_expression, include_wildcard=False)
+    )
+    spelling_suggestions = suggest_spelling_corrections(spell_check_terms)
     if spelling_suggestions and interactive:
         print("拼字建議 (索引存的是詞幹，所以建議也是詞幹形式)：")
         for term, matches in spelling_suggestions.items():
@@ -443,7 +502,8 @@ def search(query, interactive=True, weighting=DEFAULT_WEIGHTING):
         if boolean_expression is not None
         else None
     )
-    return rank_documents(query_terms, allowed_doc_ids, weighting), spelling_suggestions
+    notes = get_wildcard_notes(boolean_expression) if boolean_expression is not None else []
+    return rank_documents(query_terms, allowed_doc_ids, weighting), spelling_suggestions, notes
 
 def run_batch(queries_path, output_path, top_k, weighting=DEFAULT_WEIGHTING):
     """讀查詢檔 (每行一個查詢)，把每個查詢的前 top_k 名寫入輸出檔。"""
@@ -455,10 +515,12 @@ def run_batch(queries_path, output_path, top_k, weighting=DEFAULT_WEIGHTING):
         for query in queries:
             out.write(f"Query: {query}\n")
             try:
-                results, suggestions = search(query, interactive=False, weighting=weighting)
+                results, suggestions, notes = search(query, interactive=False, weighting=weighting)
             except ValueError as error:
                 out.write(f"# 錯誤：{error}\n\n")
                 continue
+            for note in notes:
+                out.write(f"# 萬用字元：{note}\n")
             for term, matches in suggestions.items():
                 out.write(f"# 拼字建議：{term} -> {', '.join(matches)}\n")
             if not results:
@@ -506,10 +568,13 @@ if __name__ == "__main__":
             continue
 
         try:
-            results, _ = search(query, weighting=args.weighting)
+            results, _, notes = search(query, weighting=args.weighting)
         except ValueError as error:
             print(f"查詢錯誤：{error}")
             continue
+
+        for note in notes:
+            print(f"萬用字元：{note}")
 
         if not results:
             print("找不到符合的搜尋結果。")
