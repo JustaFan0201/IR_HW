@@ -7,3 +7,7 @@ hong AND kong
 software engineer OR project manager
 the of
 goverment
+"hong kong"
+"hong kong"~5
+"open source" AND linux
+hong AND NOT kong

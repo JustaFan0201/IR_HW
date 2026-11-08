@@ -5,23 +5,29 @@ import os
 import re
 # 直接從同資料夾的 config.py 引入設定
 from config import INDEX_FILE_PATH, OUTPUT_FILE_PATH, TOP_K, TOTAL_DOCS
-from analyzer import analyze
+from analyzer import analyze, analyze_positions
 
 inverted_index = {} # term -> { "df": int, "postings": { docID: tf } }
 doc_lengths = {}    # docID -> float (向量長度)
 terms_by_length = {} # term length -> indexed terms
+term_offsets = {}   # term -> 該詞在索引檔中的位元組位置 (phrase/proximity 查詢時才回頭讀位置資訊)
 
 def load_index():
     if not os.path.exists(INDEX_FILE_PATH):
         print(f"[錯誤] 找不到索引檔：{INDEX_FILE_PATH}")
         print("請確認是否已將 HW1.txt 複製到 hw2 資料夾下！")
         exit(1)
-        
+
     print(f"正在載入倒排索引: {INDEX_FILE_PATH} ...")
-    with open(INDEX_FILE_PATH, "r", encoding="utf-8") as f:
-        for line in f:
+    offset = 0
+    # 以二進位讀取才能記錄每行的位元組位置 (文字模式的 tell() 在迭代時不可用)
+    with open(INDEX_FILE_PATH, "rb") as f:
+        for raw_line in f:
+            line_offset = offset
+            offset += len(raw_line)
+            line = raw_line.decode("utf-8")
             # 解析 HW1.txt 格式: "term, df: <docID, tf: <pos...>; ...>"
-            head, _, rest = line.rstrip("\n").partition(": <")
+            head, _, rest = line.rstrip("\r\n").partition(": <")
             term, _, df_str = head.rpartition(", ")
             df = int(df_str)
             
@@ -39,6 +45,7 @@ def load_index():
                 doc_lengths[doc_id] = doc_lengths.get(doc_id, 0.0) + (weight ** 2)
 
             inverted_index[term] = {"df": df, "postings": postings_dict}
+            term_offsets[term] = line_offset
             terms_by_length.setdefault(len(term), []).append(term)
 
     # 將所有平方和開根號，完成向量長度計算
@@ -75,10 +82,18 @@ def _spelling_distance(first, second):
                 )
     return distances[-1][-1]
 
+# 索引只存詞幹，拼錯的字常常剛好還原成索引裡的雜訊詞 (例如 goverment -> gover, df=30)。
+# 所以 df 偏低的詞也視為可疑：若有編輯距離 1 且 df 高很多倍的詞，就提出建議。
+SUSPICIOUS_DF = 50
+DF_RATIO = 20
+
 def suggest_spelling_corrections(query_terms):
     suggestions = {}
     for term in query_terms:
-        if term in inverted_index or len(term) < 4 or not term.isalpha():
+        if len(term) < 4 or not term.isalpha():
+            continue
+        term_df = inverted_index[term]["df"] if term in inverted_index else 0
+        if term_df >= SUSPICIOUS_DF:
             continue
 
         candidates = [
@@ -90,19 +105,46 @@ def suggest_spelling_corrections(query_terms):
         matches = difflib.get_close_matches(term, candidates, n=20, cutoff=0.7)
         max_distance = 1 if len(term) < 8 else 2
         ranked_matches = [
-            (distance, -inverted_index[candidate]["df"], candidate)
+            # 排序：編輯距離小 -> 字形相似度高 -> df 高 (gover 的建議要 govern 優先於 over)
+            (distance, -difflib.SequenceMatcher(None, term, candidate).ratio(),
+             -inverted_index[candidate]["df"], candidate)
             for candidate in matches
-            if (distance := _spelling_distance(term, candidate)) <= max_distance
+            if candidate != term
+            and (distance := _spelling_distance(term, candidate)) <= max_distance
+            and (
+                term_df == 0  # 完全不在索引裡
+                or (distance <= 1 and inverted_index[candidate]["df"] >= DF_RATIO * term_df)
+            )
         ]
         ranked_matches.sort()
-        matches = [candidate for _, _, candidate in ranked_matches[:3]]
+        matches = [ranked[-1] for ranked in ranked_matches[:3]]
         if matches:
             suggestions[term] = matches
     return suggestions
 
+# 查詢語法 (運算式節點)：
+#   "term"                      -> 字串
+#   ("and"/"or", 左, 右)        -> 布林運算
+#   ("not", 子式)               -> 排除 (只能搭配至少一個正向詞)
+#   ("phrase", ((詞, 位置), ...), slop) -> 片語 (slop=0) 或鄰近 (slop=k，k 個位置內、不限順序)
+_PHRASE_TOKEN_RE = re.compile(r'"([^"]*)"(?:~(\d+))?')
+
+def _is_and(token):
+    return token.lower() == "and"
+
+def _is_or(token):
+    return token.lower() == "or"
+
 def parse_boolean_query(query):
-    tokens = re.findall(r"\(|\)|[^\s()]+", query.lower())
-    if not any(token in {"and", "or", "(", ")"} for token in tokens):
+    if query.count('"') % 2:
+        raise ValueError("引號不成對。")
+    # token：帶引號的片語 (可接 ~k)、括號、其他以空白分隔的詞
+    tokens = re.findall(r'"[^"]*"(?:~\d+)?|\(|\)|[^\s()"]+', query)
+    # NOT 只認大寫，避免把一般英文的 not (停用詞) 誤判成運算子
+    if not any(
+        _is_and(t) or _is_or(t) or t in {"NOT", "(", ")"} or t.startswith('"')
+        for t in tokens
+    ):
         return None
 
     position = 0
@@ -120,10 +162,23 @@ def parse_boolean_query(query):
                 raise ValueError("布林查詢括號不匹配。")
             position += 1
             return expression
-        if token in {"and", "or", ")"}:
+        if token == "NOT":
+            position += 1
+            operand = parse_primary()
+            return None if operand is None else ("not", operand)
+        if _is_and(token) or _is_or(token) or token == ")":
             raise ValueError(f"布林運算子或括號位置錯誤：{token}")
 
         position += 1
+        if token.startswith('"'):
+            match = _PHRASE_TOKEN_RE.fullmatch(token)
+            items = analyze_positions(match.group(1))
+            slop = int(match.group(2)) if match.group(2) else 0
+            if not items:
+                return None
+            if len(items) == 1:
+                return items[0][0]
+            return ("phrase", tuple(items), slop)
         # 與 HW1 索引相同的分析鏈：切詞/小寫/停用詞/詞幹；停用詞回傳 None，多詞 (如 non-profit) 視為 AND
         expression = None
         for term in analyze(token):
@@ -141,8 +196,8 @@ def parse_boolean_query(query):
     def parse_and():
         nonlocal position
         expression = parse_primary()
-        while position < len(tokens) and tokens[position] not in {"or", ")"}:
-            if tokens[position] == "and":
+        while position < len(tokens) and not _is_or(tokens[position]) and tokens[position] != ")":
+            if _is_and(tokens[position]):
                 position += 1
             expression = combine("and", expression, parse_primary())
         return expression
@@ -150,7 +205,7 @@ def parse_boolean_query(query):
     def parse_or():
         nonlocal position
         expression = parse_and()
-        while position < len(tokens) and tokens[position] == "or":
+        while position < len(tokens) and _is_or(tokens[position]):
             position += 1
             expression = combine("or", expression, parse_and())
         return expression
@@ -163,13 +218,25 @@ def parse_boolean_query(query):
     return expression
 
 def get_boolean_terms(expression):
+    """取出參與計分的正向詞 (NOT 底下的詞不計分)。"""
     if isinstance(expression, str):
         return [expression]
+    if expression[0] == "phrase":
+        return [term for term, _ in expression[1]]
+    if expression[0] == "not":
+        return []
     return get_boolean_terms(expression[1]) + get_boolean_terms(expression[2])
 
 def replace_boolean_terms(expression, suggestions):
     if isinstance(expression, str):
         return suggestions.get(expression, [expression])[0]
+    if expression[0] == "phrase":
+        items = tuple(
+            (suggestions.get(term, [term])[0], offset) for term, offset in expression[1]
+        )
+        return ("phrase", items, expression[2])
+    if expression[0] == "not":
+        return ("not", replace_boolean_terms(expression[1], suggestions))
     operator, left, right = expression
     return (
         operator,
@@ -177,9 +244,84 @@ def replace_boolean_terms(expression, suggestions):
         replace_boolean_terms(right, suggestions),
     )
 
+def read_positions(term, doc_ids):
+    """回頭讀索引檔，取出 term 在指定文件中的位置清單 {docID: [pos, ...]}。"""
+    offset = term_offsets.get(term)
+    if offset is None:
+        return {}
+    with open(INDEX_FILE_PATH, "rb") as f:
+        f.seek(offset)
+        line = f.readline().decode("utf-8").rstrip("\r\n")
+    _, _, rest = line.partition(": <")
+    found = {}
+    for posting in rest[:-1].split("; "):
+        doc_part, _, positions_part = posting.partition(": <")
+        doc_id = doc_part.partition(", ")[0]
+        if doc_id in doc_ids:
+            found[doc_id] = [int(p) for p in positions_part.rstrip(">").split(", ")]
+    return found
+
+def _phrase_in_order(items, position_lists):
+    """每個詞的位置要剛好等於第一個詞的位置加上它們在查詢裡的相對位置 (含停用詞留下的空位)。"""
+    base = items[0][1]
+    later_sets = [set(positions) for positions in position_lists[1:]]
+    return any(
+        all(start + items[i][1] - base in later_sets[i - 1] for i in range(1, len(items)))
+        for start in position_lists[0]
+    )
+
+def _within_window(position_lists, slop):
+    """所有詞是否出現在寬度 slop 的視窗內 (不限順序)，用滑動視窗掃描合併後的位置。"""
+    merged = sorted((p, i) for i, positions in enumerate(position_lists) for p in positions)
+    needed = len(position_lists)
+    counts = [0] * needed
+    covered = 0
+    left = 0
+    for right in range(len(merged)):
+        index = merged[right][1]
+        if counts[index] == 0:
+            covered += 1
+        counts[index] += 1
+        while covered == needed:
+            if merged[right][0] - merged[left][0] <= slop:
+                return True
+            counts[merged[left][1]] -= 1
+            if counts[merged[left][1]] == 0:
+                covered -= 1
+            left += 1
+    return False
+
+def evaluate_phrase(items, slop):
+    terms = [term for term, _ in items]
+    if any(term not in inverted_index for term in terms):
+        return set()
+
+    # 先用 AND 縮小候選文件，再只對候選文件讀位置
+    candidates = None
+    for term in sorted(set(terms), key=lambda t: inverted_index[t]["df"]):
+        docs = set(inverted_index[term]["postings"])
+        candidates = docs if candidates is None else candidates & docs
+        if not candidates:
+            return set()
+
+    positions = {term: read_positions(term, candidates) for term in set(terms)}
+    matched = set()
+    for doc_id in candidates:
+        position_lists = [positions[term][doc_id] for term in terms]
+        if slop == 0:
+            if _phrase_in_order(items, position_lists):
+                matched.add(doc_id)
+        elif _within_window(position_lists, slop):
+            matched.add(doc_id)
+    return matched
+
 def evaluate_boolean_query(expression):
     if isinstance(expression, str):
         return set(inverted_index.get(expression, {}).get("postings", {}))
+    if expression[0] == "phrase":
+        return evaluate_phrase(expression[1], expression[2])
+    if expression[0] == "not":
+        return set(doc_lengths) - evaluate_boolean_query(expression[1])
 
     operator, left, right = expression
     left_docs = evaluate_boolean_query(left)
@@ -234,11 +376,11 @@ def search(query, interactive=True):
     if boolean_expression is not None:
         query_terms = get_boolean_terms(boolean_expression)
     if not query_terms:
-        raise ValueError("查詢只含停用詞或符號，沒有可搜尋的詞。")
+        raise ValueError("沒有可計分的正向搜尋詞 (查詢只含停用詞、符號，或只有 NOT)。")
 
     spelling_suggestions = suggest_spelling_corrections(query_terms)
     if spelling_suggestions and interactive:
-        print("拼字建議：")
+        print("拼字建議 (索引存的是詞幹，所以建議也是詞幹形式)：")
         for term, matches in spelling_suggestions.items():
             print(f"  {term} -> {', '.join(matches)}")
         use_suggestions = input("使用以上第一個建議替換查詢詞嗎？(y/N) ").strip().lower()

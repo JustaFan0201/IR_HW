@@ -38,8 +38,10 @@ python SourceCode/Search.py
 啟動後，您可以在終端機的 `cmd>` 提示字元輸入以下查詢類型：
 - **單一關鍵字 (Single keywords)**：例如 `airplanes`
 - **自由文本 (Free texts)**：例如 `United States government`
-- **拼字校正 (Spell correction)**：查詢詞不在索引中時會列出最多 3 個候選詞，輸入 `y` 使用第一個建議，只檢查至少 4 個字母的英文詞
-- **布林運算子搜尋 (Boolean operators search)**：支援 `AND`、`OR` 及括號，例如 `hong AND kong`、`hong OR kong`、`(arc OR zip) AND stop`。查詢含有 Boolean 運算子或括號時，未寫運算子的相鄰詞視為 `AND`，且 `AND` 優先於 `OR`。
+- **拼字校正 (Spell correction)**：查詢詞不在索引中、或 df 很低 (<50) 且有 df 高 20 倍以上的相近詞時，會列出最多 3 個候選詞，輸入 `y` 使用第一個建議，只檢查至少 4 個字母的英文詞。索引存的是詞幹，所以建議也是詞幹形式 (例如 `goverment` → `govern`)。
+- **布林運算子搜尋 (Boolean operators search)**：支援 `AND`、`OR`、`NOT` 及括號，例如 `hong AND kong`、`hong OR kong`、`(arc OR zip) AND stop`、`hong AND NOT kong`。未寫運算子的相鄰詞視為 `AND`，`NOT` 優先於 `AND`，`AND` 優先於 `OR`。`NOT` 必須大寫 (小寫的 not 是停用詞)，且至少要搭配一個正向詞。
+- **片語查詢 (Phrase search)**：用雙引號，例如 `"hong kong"`，要求詞依序緊鄰出現。利用索引中的位置資訊 (只有候選文件才回頭讀位置，不佔用額外記憶體)；停用詞留下的空位會被保留，所以 `"united states of america"` 中的 `of` 位置可由任何停用詞佔據。
+- **鄰近查詢 (Proximity search)**：片語後加 `~k`，例如 `"hong kong"~5`，要求所有詞出現在 k 個詞位置之內 (不限順序)。可與其他運算子組合，例如 `"open source" AND linux`。
 
 **4.3 輸出格式與前 N 名 (`--top`)：**
 系統採用 **向量空間模型 (Vector Space Model)** 排序，輸出格式遵守作業規範：

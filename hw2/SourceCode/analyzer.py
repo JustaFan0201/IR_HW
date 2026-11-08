@@ -32,12 +32,18 @@ def _stem(token):
     return stemmed
 
 
-def analyze(text):
-    """回傳經過 切詞 -> 轉小寫 -> 去停用詞 -> 詞幹還原 的詞串列。"""
-    terms = []
-    for token in _TOKEN_RE.findall(text):
+def analyze_positions(text):
+    """回傳 [(詞, 位置)]。位置照切詞順序編號，停用詞佔位但不輸出，
+    與 HW1 索引一致 (移除停用詞後位置不重新編號)，phrase 查詢才對得上。"""
+    items = []
+    for position, token in enumerate(_TOKEN_RE.findall(text)):
         token = token.lower()
         if token in STOPWORDS:
             continue
-        terms.append(_stem(token))
-    return terms
+        items.append((_stem(token), position))
+    return items
+
+
+def analyze(text):
+    """回傳經過 切詞 -> 轉小寫 -> 去停用詞 -> 詞幹還原 的詞串列。"""
+    return [term for term, _ in analyze_positions(text)]
