@@ -53,6 +53,20 @@ python SourceCode/Search.py --top 20
 ```
 互動模式輸入 `exit` 即可安全關閉系統。
 
+**4.3.0 權重/排序方案 (`--weighting`)：**
+預設是作業指定的 TF-IDF；可用 `--weighting` 切換 (參數定義在 `config.py`)：
+
+| 方案 | 文件詞權重 | 排序 |
+|---|---|---|
+| `tfidf` (預設) | `(1 + log tf) × log(N/df)` | cosine similarity (分數 0~1) |
+| `tfidf-raw` | `tf × log(N/df)` (tf 不取 log) | cosine similarity |
+| `bm25` | Okapi BM25 (`k1=1.2`、`b=0.75`，文件長度為索引中的詞數) | 直接加總，不做正規化，分數可大於 1 |
+
+```bash
+python SourceCode/Search.py --weighting bm25 --top 20
+```
+批次輸出檔第一行會註明使用的方案 (`# weighting: ...`)。
+
 **4.3.1 批次模式與輸出檔：**
 給一個查詢檔 (每行一個查詢，範例見 `queries.txt`)，結果寫入輸出檔 (預設 `HW2.txt`，可用 `--output` 或 `config.py` 修改)：
 ```bash

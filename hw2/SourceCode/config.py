@@ -21,3 +21,13 @@ TOP_K = 10
 # 批次模式 (--queries) 的預設輸出檔 (hw2/HW2.txt)
 OUTPUT_FILE_NAME = "HW2.txt"
 OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
+
+# 預設權重/排序方案 (可用命令列 --weighting 覆蓋)：
+#   tfidf     : 作業指定公式 (1 + log tf) * log(N/df)，cosine similarity
+#   tfidf-raw : 原始 tf * log(N/df)，cosine similarity
+#   bm25      : Okapi BM25 (不做 cosine 正規化，分數不在 0~1 之間)
+DEFAULT_WEIGHTING = "tfidf"
+
+# BM25 參數
+BM25_K1 = 1.2
+BM25_B = 0.75
