@@ -4,6 +4,7 @@ import os
 import re
 # 直接從同資料夾的 config.py 引入設定
 from config import INDEX_FILE_PATH, TOTAL_DOCS
+from analyzer import analyze
 
 inverted_index = {} # term -> { "df": int, "postings": { docID: tf } }
 doc_lengths = {}    # docID -> float (向量長度)
@@ -122,7 +123,19 @@ def parse_boolean_query(query):
             raise ValueError(f"布林運算子或括號位置錯誤：{token}")
 
         position += 1
-        return token
+        # 與 HW1 索引相同的分析鏈：切詞/小寫/停用詞/詞幹；停用詞回傳 None，多詞 (如 non-profit) 視為 AND
+        expression = None
+        for term in analyze(token):
+            expression = combine("and", expression, term)
+        return expression
+
+    def combine(operator, left, right):
+        # None 代表被停用詞移除的項，不影響另一邊
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return (operator, left, right)
 
     def parse_and():
         nonlocal position
@@ -130,7 +143,7 @@ def parse_boolean_query(query):
         while position < len(tokens) and tokens[position] not in {"or", ")"}:
             if tokens[position] == "and":
                 position += 1
-            expression = ("and", expression, parse_primary())
+            expression = combine("and", expression, parse_primary())
         return expression
 
     def parse_or():
@@ -138,12 +151,14 @@ def parse_boolean_query(query):
         expression = parse_and()
         while position < len(tokens) and tokens[position] == "or":
             position += 1
-            expression = ("or", expression, parse_and())
+            expression = combine("or", expression, parse_and())
         return expression
 
     expression = parse_or()
     if position != len(tokens):
         raise ValueError(f"布林查詢語法錯誤：{tokens[position]}")
+    if expression is None:
+        raise ValueError("布林查詢只含停用詞，沒有可搜尋的詞。")
     return expression
 
 def get_boolean_terms(expression):
@@ -220,9 +235,8 @@ if __name__ == "__main__":
         if not query.strip():
             continue
             
-        # TODO: 未來在此處實作呼叫 Solr Analysis API 進行查詢前處理 (Stemming/Stopwords)
-        # 目前先以簡單轉小寫與空白切割處理
-        query_terms = query.lower().split()
+        # 查詢前處理與 HW1 索引一致 (StandardTokenizer -> 小寫 -> 停用詞 -> Porter 詞幹)
+        query_terms = analyze(query)
         try:
             boolean_expression = parse_boolean_query(query)
         except ValueError as error:
@@ -230,6 +244,10 @@ if __name__ == "__main__":
             continue
         if boolean_expression is not None:
             query_terms = get_boolean_terms(boolean_expression)
+
+        if not query_terms:
+            print("查詢只含停用詞或符號，沒有可搜尋的詞。")
+            continue
 
         spelling_suggestions = suggest_spelling_corrections(query_terms)
         if spelling_suggestions:

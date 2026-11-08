@@ -5,6 +5,7 @@
 
 - **Python 版本**：建議使用 Python 3.10 以上版本 (本專案於 Python 3.13 測試通過)。
 - **相依檔案需求**：先透過 HW1 生成倒排索引檔 (預設為 `HW1.txt`)。
+- **相依套件**：`pip install -r requirements.txt`（僅需 nltk，提供 Porter 詞幹還原，與 HW1 的 Solr PorterStemFilter 一致）。
 - **無特殊編譯器需求**：本專案以純 Python 實作向量空間模型，無需額外安裝 Java 執行環境或 Solr 伺服器即可進行搜尋運算。
 
 ---
@@ -33,6 +34,7 @@ python SourceCode/Search.py
 ```
 
 **4.2 支援的查詢格式 (Supported Queries)：**
+查詢會先經過與 HW1 索引相同的分析鏈 (`SourceCode/analyzer.py`：切詞 → 小寫 → 停用詞 → Porter 詞幹)，因此 `governments` 會對應到索引中的 `govern`。
 啟動後，您可以在終端機的 `cmd>` 提示字元輸入以下查詢類型：
 - **單一關鍵字 (Single keywords)**：例如 `airplanes`
 - **自由文本 (Free texts)**：例如 `United States government`
