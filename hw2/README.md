@@ -33,6 +33,7 @@ python SourceCode/Search.py --queries queries.txt --output HW2.txt --top 100   #
 |---|---|
 | `--top N` | 顯示/輸出前 N 名 |
 | `--weighting` | `tfidf` (預設)、`tfidf-raw`、`bm25`，見第 5 節 |
+| `--champion R` | 啟用 champion list 近似檢索，見第 6 節 |
 | `--queries FILE` | 批次模式：查詢檔，每行一個查詢 |
 | `--output FILE` | 批次模式的輸出檔 |
 
@@ -71,3 +72,31 @@ python SourceCode/Search.py --queries queries.txt --output HW2.txt --top 100   #
 | `bm25` | Okapi BM25，文件長度為索引中的詞數 | 直接加總，分數可大於 1 |
 
 **批次輸出檔**：每個查詢一段，以 `Query:` 開頭，接著每行 `<doc#>` 與分數 (以 Tab 分隔)；第一行 `# weighting: ...` 註明方案，其他 `#` 開頭的行是註解 (錯誤訊息、拼字建議、萬用字元展開說明)。批次模式不會詢問拼字替換，只把建議寫成註解。
+
+## 6. 近似 top-k：champion list (`--champion R`)
+
+```bash
+python SourceCode/Search.py --champion 200               # 互動模式
+python SourceCode/Search.py --champion 200 --weighting bm25
+python SourceCode/Benchmark.py                           # 速度與排名差異比較
+```
+
+啟動時為每個 df > R 的詞建立 champion list：只保留「對該詞貢獻最大」的 R 篇文件 (貢獻依所選權重方案計算，含文件長度正規化)。查詢時只掃 champion list，不掃完整 postings。
+- champion list 是針對 `--weighting` 建立的，查詢用的方案必須一致 (CLI 保證一致)。
+- 結果少於 `--top` 篇時，自動退回掃完整 postings (精確計分)。
+- 布林/片語/萬用字元的「文件篩選」仍是精確的，只有計分是近似。
+- 因為只計 champion 內的文件，畫面或輸出檔顯示的命中篇數會比精確模式少，前幾名則大致相同。
+
+`Benchmark.py` 實測結果 (35,011 篇文件、12 個查詢，只量計分與排序；前 10 名重疊率 = 與精確計分前 10 名相同的比例)：
+
+| 權重方案 | R | 平均耗時 | 加速 | 前 10 名重疊 |
+|---|---|---|---|---|
+| tfidf | 精確 | 10.01 ms | 1x | 100% |
+| tfidf | 50 | 0.05 ms | 186x | 66% |
+| tfidf | 200 | 0.22 ms | 45x | 92% |
+| tfidf | 1000 | 1.10 ms | 9x | 98% |
+| bm25 | 精確 | 9.77 ms | 1x | 100% |
+| bm25 | 200 | 0.23 ms | 43x | 70% |
+| bm25 | 1000 | 1.38 ms | 7x | 93% |
+
+R 越小越快、越不準；`tfidf` 用 R=200 是不錯的折衷。(耗時會隨機器而異。)

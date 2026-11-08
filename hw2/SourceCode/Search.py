@@ -1,5 +1,6 @@
 import argparse
 import difflib
+import heapq
 import math
 import os
 import re
@@ -18,6 +19,8 @@ doc_token_counts = {} # docID -> 文件在索引中的詞數 (BM25 的文件長�
 avg_doc_length = 0.0
 terms_by_length = {} # term length -> indexed terms
 sorted_terms = []   # 排序後的所有索引詞 (萬用字元前綴比對用 bisect)
+champion_lists = {} # term -> [(docID, tf)]，只含 df 大於 champion 大小的詞 (--champion 才會建立)
+champion_state = {"weighting": None}  # champion list 是依哪個權重方案建立的
 term_offsets = {}   # term -> 該詞在索引檔中的位元組位置 (phrase/proximity 查詢時才回頭讀位置資訊)
 
 def load_index():
@@ -399,7 +402,42 @@ def evaluate_boolean_query(expression):
         return left_docs & right_docs
     return left_docs | right_docs
 
-def _rank_bm25(query_terms, allowed_doc_ids):
+def _champion_key(weighting):
+    """文件對某個詞的貢獻 (與該方案的計分一致，含文件長度正規化)，用來挑 champion。
+    只用 tf 挑會偏向長文件，但 cosine/BM25 會做長度正規化，所以前幾名常是短文件。"""
+    if weighting == "bm25":
+        return lambda doc_id, tf: tf * (BM25_K1 + 1) / (
+            tf + BM25_K1 * (1 - BM25_B + BM25_B * doc_token_counts[doc_id] / avg_doc_length))
+    if weighting == "tfidf-raw":
+        return lambda doc_id, tf: tf / doc_lengths_raw[doc_id]
+    return lambda doc_id, tf: (1 + math.log10(tf)) / doc_lengths[doc_id]
+
+def build_champion_lists(size, weighting=DEFAULT_WEIGHTING):
+    """為每個 df > size 的詞建立 champion list：只保留對該詞貢獻最大的 size 篇文件。
+
+    df <= size 的詞 postings 本來就夠短，不需要。這是近似 top-k 檢索 (課本第 7 章)：
+    查詢時只掃 champion list，不掃完整 postings，用少量的排名誤差換速度。
+    champion list 依權重方案建立，只在查詢用同一個方案時才會被使用。
+    """
+    champion_lists.clear()
+    contribution = _champion_key(weighting)
+    for term, entry in inverted_index.items():
+        if entry["df"] > size:
+            champion_lists[term] = heapq.nlargest(
+                size, entry["postings"].items(), key=lambda item: contribution(item[0], item[1])
+            )
+    champion_state["weighting"] = weighting
+    return len(champion_lists)
+
+def _scoring_postings(term, use_champion):
+    """計分時要掃的 (docID, tf)：啟用 champion 且該詞有 champion list 時用它，否則用完整 postings。"""
+    if use_champion:
+        champion = champion_lists.get(term)
+        if champion is not None:
+            return champion
+    return inverted_index[term]["postings"].items()
+
+def _rank_bm25(query_terms, allowed_doc_ids, use_champion=False):
     """Okapi BM25：score = sum idf * tf*(k1+1) / (tf + k1*(1-b+b*|d|/avgdl))。
     idf 用 ln(1 + (N-df+0.5)/(df+0.5)) (恆為正)；不做 cosine 正規化。"""
     scores = {}
@@ -409,19 +447,32 @@ def _rank_bm25(query_terms, allowed_doc_ids):
             continue
         df = entry["df"]
         idf = math.log(1 + (TOTAL_DOCS - df + 0.5) / (df + 0.5))
-        for doc_id, tf in entry["postings"].items():
+        for doc_id, tf in _scoring_postings(term, use_champion):
             if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
                 continue
             length_norm = BM25_K1 * (1 - BM25_B + BM25_B * doc_token_counts[doc_id] / avg_doc_length)
             scores[doc_id] = scores.get(doc_id, 0.0) + idf * tf * (BM25_K1 + 1) / (tf + length_norm)
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-def rank_documents(query_terms, allowed_doc_ids=None, weighting=DEFAULT_WEIGHTING):
-    """依指定權重方案計分並排序，回傳 [(docID, score)] (分數高到低)。"""
+def rank_documents(query_terms, allowed_doc_ids=None, weighting=DEFAULT_WEIGHTING,
+                   use_champion=False, min_results=0):
+    """依指定權重方案計分並排序，回傳 [(docID, score)] (分數高到低)。
+
+    use_champion=True 時只掃 champion list (近似、較快)；若結果少於 min_results 篇
+    (champion list 裡的文件不夠)，退回掃完整 postings 重算。
+    """
+    # champion list 是針對特定權重方案建立的，方案不同就不能用
+    use_champion = use_champion and champion_state["weighting"] == weighting
+    results = _rank_once(query_terms, allowed_doc_ids, weighting, use_champion)
+    if use_champion and len(results) < min_results:
+        results = _rank_once(query_terms, allowed_doc_ids, weighting, False)
+    return results
+
+def _rank_once(query_terms, allowed_doc_ids, weighting, use_champion):
     if weighting not in WEIGHTING_SCHEMES:
         raise ValueError(f"未知的權重方案：{weighting}")
     if weighting == "bm25":
-        return _rank_bm25(query_terms, allowed_doc_ids)
+        return _rank_bm25(query_terms, allowed_doc_ids, use_champion)
 
     # 向量空間模型：tfidf = (1+log tf)*idf；tfidf-raw = tf*idf；兩者都用 cosine similarity
     if weighting == "tfidf-raw":
@@ -446,9 +497,8 @@ def rank_documents(query_terms, allowed_doc_ids=None, weighting=DEFAULT_WEIGHTIN
 
     # 計算內積 (Dot Product)
     for term, q_weight in query_weights.items():
-        postings = inverted_index[term]["postings"]
         idf = math.log10(TOTAL_DOCS / inverted_index[term]["df"])
-        for doc_id, tf in postings.items():
+        for doc_id, tf in _scoring_postings(term, use_champion):
             if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
                 continue
             scores[doc_id] = scores.get(doc_id, 0.0) + (q_weight * tf_weight(tf) * idf)
@@ -463,11 +513,13 @@ def rank_documents(query_terms, allowed_doc_ids=None, weighting=DEFAULT_WEIGHTIN
     results.sort(key=lambda x: x[1], reverse=True)
     return results
 
-def search(query, interactive=True, weighting=DEFAULT_WEIGHTING):
+def search(query, interactive=True, weighting=DEFAULT_WEIGHTING, use_champion=False, top_k=TOP_K):
     """執行一個查詢，回傳 (results, spelling_suggestions, notes)；notes 是萬用字元展開說明。
 
     查詢格式錯誤或沒有可搜尋的詞時丟出 ValueError。
     interactive=True 時遇到拼字建議會詢問使用者是否替換；批次模式不替換，只回傳建議。
+    use_champion=True 時用 champion list 近似計分 (需先 build_champion_lists)，
+    結果不足 top_k 篇時自動退回精確計分。
     """
     # 查詢前處理與 HW1 索引一致 (StandardTokenizer -> 小寫 -> 停用詞 -> Porter 詞幹)
     query_terms = analyze(query)
@@ -503,19 +555,25 @@ def search(query, interactive=True, weighting=DEFAULT_WEIGHTING):
         else None
     )
     notes = get_wildcard_notes(boolean_expression) if boolean_expression is not None else []
-    return rank_documents(query_terms, allowed_doc_ids, weighting), spelling_suggestions, notes
+    results = rank_documents(query_terms, allowed_doc_ids, weighting, use_champion, min_results=top_k)
+    return results, spelling_suggestions, notes
 
-def run_batch(queries_path, output_path, top_k, weighting=DEFAULT_WEIGHTING):
+def run_batch(queries_path, output_path, top_k, weighting=DEFAULT_WEIGHTING, use_champion=False):
     """讀查詢檔 (每行一個查詢)，把每個查詢的前 top_k 名寫入輸出檔。"""
     with open(queries_path, "r", encoding="utf-8") as f:
         queries = [line.strip() for line in f if line.strip()]
 
     with open(output_path, "w", encoding="utf-8") as out:
-        out.write(f"# weighting: {weighting}\n\n")
+        out.write(f"# weighting: {weighting}\n")
+        if use_champion:
+            out.write("# champion list: 啟用 (近似 top-k)\n")
+        out.write("\n")
         for query in queries:
             out.write(f"Query: {query}\n")
             try:
-                results, suggestions, notes = search(query, interactive=False, weighting=weighting)
+                results, suggestions, notes = search(
+                    query, interactive=False, weighting=weighting,
+                    use_champion=use_champion, top_k=top_k)
             except ValueError as error:
                 out.write(f"# 錯誤：{error}\n\n")
                 continue
@@ -543,6 +601,8 @@ if __name__ == "__main__":
                         help=f"顯示/輸出前 N 名 (預設 {TOP_K}，可在 config.py 的 TOP_K 修改)")
     parser.add_argument("--weighting", choices=WEIGHTING_SCHEMES, default=DEFAULT_WEIGHTING,
                         help=f"權重/排序方案 (預設 {DEFAULT_WEIGHTING})：tfidf、tfidf-raw、bm25")
+    parser.add_argument("--champion", type=positive_int, metavar="R",
+                        help="啟用 champion list 近似檢索：每個詞只保留貢獻最大的 R 篇文件計分 (較快，排名可能略有出入)")
     parser.add_argument("--queries", metavar="FILE",
                         help="批次模式：查詢檔，每行一個查詢；結果寫入輸出檔")
     parser.add_argument("--output", metavar="FILE", default=OUTPUT_FILE_PATH,
@@ -551,13 +611,19 @@ if __name__ == "__main__":
 
     load_index()
 
+    use_champion = args.champion is not None
+    if use_champion:
+        count = build_champion_lists(args.champion, args.weighting)
+        print(f"champion list 建立完成：{count} 個詞 (每個保留貢獻最大的 {args.champion} 篇)")
+
     if args.queries:
-        run_batch(args.queries, args.output, args.top, args.weighting)
+        run_batch(args.queries, args.output, args.top, args.weighting, use_champion)
         raise SystemExit(0)
 
     print("==================================================")
     print(" 歡迎使用 IR Homework 2: 查詢處理與搜尋系統")
-    print(f" 權重方案：{args.weighting}；每次顯示前 {args.top} 名；輸入 'exit' 離開程式")
+    mode = f"champion list (R={args.champion})" if use_champion else "精確計分"
+    print(f" 權重方案：{args.weighting}；{mode}；每次顯示前 {args.top} 名；輸入 'exit' 離開程式")
     print("==================================================")
 
     while True:
@@ -568,7 +634,8 @@ if __name__ == "__main__":
             continue
 
         try:
-            results, _, notes = search(query, weighting=args.weighting)
+            results, _, notes = search(query, weighting=args.weighting,
+                                       use_champion=use_champion, top_k=args.top)
         except ValueError as error:
             print(f"查詢錯誤：{error}")
             continue
