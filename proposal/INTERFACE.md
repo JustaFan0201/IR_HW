@@ -4,10 +4,11 @@
 
 ## 共通規則
 
+- 索引檔放在 `final_project/HW1.txt`（不進 git，各自建好或從 `hw2/` 複製過來）。
 - **doc ID 一律是字串**（例如 `"123"`），和 `Search.py` 現有的 `inverted_index` 一致。
 - **詞一律是經過 `analyzer.analyze()` 處理後的詞**（小寫、去停用詞、Porter stemming），不是原始字串。
 - **分數越高越相關**，排序結果一律依分數由高到低。
-- 程式放在 `hw2/SourceCode/`，可以直接 `import Search`、`from analyzer import analyze`，索引用 `Search.load_index()` 載入的那一份，不要自己再讀一次 `HW1.txt`。
+- 程式放在 `final_project/SourceCode/`（由 hw2 複製而來，hw2 保留原樣不改），可以直接 `import Search`、`from analyzer import analyze`，索引用 `Search.load_index()` 載入的那一份，不要自己再讀一次 `HW1.txt`。
 
 ## 檔案分配
 
