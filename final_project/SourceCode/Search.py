@@ -658,6 +658,18 @@ def positive_int(value):
         raise argparse.ArgumentTypeError("必須是大於 0 的整數")
     return number
 
+def get_doc_vector(doc_id: str) -> dict[str, float]:
+    """回傳指定文件向量 {term: tfidf_weight}"""
+    doc_vec = {}
+    # 遍歷倒排索引找出該 doc_id 包含的詞與權重
+    for term, entry in inverted_index.items():
+        if doc_id in entry["postings"]:
+            tf = entry["postings"][doc_id]
+            df = entry["df"]
+            idf = math.log10(TOTAL_DOCS / df)
+            doc_vec[term] = (1 + math.log10(tf)) * idf
+    return doc_vec
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="IR HW2: 向量空間模型搜尋 (TF-IDF + cosine similarity)")
     parser.add_argument("--top", type=positive_int, default=TOP_K,
