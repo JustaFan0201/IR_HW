@@ -661,7 +661,6 @@ def positive_int(value):
 def get_doc_vector(doc_id: str) -> dict[str, float]:
     """回傳指定文件向量 {term: tfidf_weight}"""
     doc_vec = {}
-    # 遍歷倒排索引找出該 doc_id 包含的詞與權重
     for term, entry in inverted_index.items():
         if doc_id in entry["postings"]:
             tf = entry["postings"][doc_id]
