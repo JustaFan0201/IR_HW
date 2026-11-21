@@ -16,6 +16,7 @@ inverted_index = {} # term -> { "df": int, "postings": { docID: tf } }
 doc_lengths = {}    # docID -> float (tfidf 方案的文件向量長度)
 doc_lengths_raw = {} # docID -> float (tfidf-raw 方案的文件向量長度)
 doc_token_counts = {} # docID -> 文件在索引中的詞數 (BM25 的文件長度)
+doc_terms_cache = {} # docID -> [term, ...] (該文件包含哪些詞，get_doc_vector 用來避免掃全部詞彙)
 avg_doc_length = 0.0
 terms_by_length = {} # term length -> indexed terms
 sorted_terms = []   # 排序後的所有索引詞 (萬用字元前綴比對用 bisect)
@@ -59,6 +60,7 @@ def load_index():
                 raw_weight = tf * idf  # tfidf-raw 方案
                 doc_lengths_raw[doc_id] = doc_lengths_raw.get(doc_id, 0.0) + (raw_weight ** 2)
                 doc_token_counts[doc_id] = doc_token_counts.get(doc_id, 0) + tf
+                doc_terms_cache.setdefault(doc_id, []).append(term)
 
             inverted_index[term] = {"df": df, "postings": postings_dict}
             term_offsets[term] = line_offset
@@ -657,6 +659,17 @@ def positive_int(value):
     if number < 1:
         raise argparse.ArgumentTypeError("必須是大於 0 的整數")
     return number
+
+def get_doc_vector(doc_id: str) -> dict[str, float]:
+    """回傳指定文件向量 {term: tfidf_weight}"""
+    doc_vec = {}
+    for term in doc_terms_cache.get(doc_id, []):
+        entry = inverted_index[term]
+        tf = entry["postings"][doc_id]
+        df = entry["df"]
+        idf = math.log10(TOTAL_DOCS / df)
+        doc_vec[term] = (1 + math.log10(tf)) * idf
+    return doc_vec
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="IR HW2: 向量空間模型搜尋 (TF-IDF + cosine similarity)")
