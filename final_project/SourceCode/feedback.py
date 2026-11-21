@@ -1,6 +1,5 @@
 import Search as S
 from analyzer import analyze
-# 從 config 載入模組 A 的預設參數
 from config import ROCCHIO_ALPHA, ROCCHIO_BETA, ROCCHIO_GAMMA, EXPAND_TERMS_M
 
 
@@ -13,11 +12,11 @@ def rocchio(query_vec: dict[str, float],
     """回傳新的查詢向量 {詞: 權重}，負權重的詞要拿掉。"""
     new_vec = {}
 
-    # 1. alpha * Q_old
+    # alpha * Q_old
     for term, w in query_vec.items():
         new_vec[term] = alpha * w
 
-    # 2. + (beta / |Dr|) * sum(d_r)
+    # + (beta / |Dr|) * sum(d_r)
     if rel_ids:
         scale_rel = beta / len(rel_ids)
         for doc_id in rel_ids:
@@ -25,7 +24,7 @@ def rocchio(query_vec: dict[str, float],
             for term, w in d_vec.items():
                 new_vec[term] = new_vec.get(term, 0.0) + scale_rel * w
 
-    # 3. - (gamma / |Dnr|) * sum(d_nr)
+    # - (gamma / |Dnr|) * sum(d_nr)
     if nonrel_ids:
         scale_nonrel = gamma / len(nonrel_ids)
         for doc_id in nonrel_ids:
@@ -33,7 +32,7 @@ def rocchio(query_vec: dict[str, float],
             for term, w in d_vec.items():
                 new_vec[term] = new_vec.get(term, 0.0) - scale_nonrel * w
 
-    # 4. 剔除權重 <= 0 的詞
+    # 剔除權重 <= 0 的詞
     return {term: w for term, w in new_vec.items() if w > 0}
 
 

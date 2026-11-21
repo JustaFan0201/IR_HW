@@ -19,7 +19,7 @@ TOTAL_DOCS = 35011
 TOP_K = 10
 
 # 批次模式 (--queries) 的預設輸出檔 (hw2/HW2.txt)
-OUTPUT_FILE_NAME = "HW2.txt"
+OUTPUT_FILE_NAME = "final_project.txt"
 OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
 
 # 網頁介面 (WebApp.py) 顯示摘要與全文用的 HW1 WARC 檔；找不到時網頁仍可搜尋，只是沒有摘要
