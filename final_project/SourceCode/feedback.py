@@ -40,6 +40,9 @@ def rocchio(query_vec: dict[str, float],
 def expand_terms(query: str, top_ids: list[str], m=EXPAND_TERMS_M) -> list[tuple[str, float]]:
     """回傳建議擴展詞 [(詞, 分數)]，分數高到低，最多 m 個，不含原查詢已有的詞。"""
     orig_terms = set(analyze(query))
+    expression = S.parse_boolean_query(query)
+    if expression is not None:
+        orig_terms.update(S.get_boolean_terms(expression))
     
     term_scores = {}
     for doc_id in top_ids:
