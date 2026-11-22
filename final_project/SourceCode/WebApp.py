@@ -6,6 +6,8 @@
   - 搜尋框 (支援布林、片語、鄰近、萬用字元) 與權重方案、顯示筆數選單
   - 拼字/發音建議，點一下就套用
   - 結果摘要並標示查詢詞 (highlighting)，點標題可看全文 (同樣標示)
+  - 結果分群 (模組 B)：對前 N 篇結果做 k-means / 階層式分群，左側欄顯示各群標籤與篇數，點一群只看該群；
+    上方的 2D 散佈圖 (PCA) 每個點是一篇文件、顏色是所屬群，點一個點就打開該篇文件
 摘要與全文來自 HW1 的 WARC 檔 (config.py 的 WARC_FILE_PATH)；找不到該檔時仍可搜尋，只是不顯示摘要。
 """
 import argparse
@@ -19,14 +21,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import Search
+import clustering
 from analyzer import analyze, token_spans
-from config import BASE_DIR, DEFAULT_WEIGHTING, TOP_K, WARC_FILE_PATH
+from config import (BASE_DIR, CLUSTER_METHOD, CLUSTER_TOP_N, DEFAULT_WEIGHTING, TOP_K,
+                    WARC_FILE_PATH)
 
 SNIPPET_CHARS = 300
 FULL_TEXT_CHARS = 100_000
 TOP_CHOICES = (10, 20, 50, 100)
 EXAMPLES = ['airplanes', 'United States government', 'hong AND NOT kong', '"hong kong"~5',
-            'govern*', 'goverment', 'mikrosoft']
+            'govern*', 'goverment', 'mikrosoft', 'java', 'apple', 'jaguar']
+CLUSTER_OFF = "off"
+CLUSTER_CHOICES = (CLUSTER_OFF,) + clustering.METHODS
+K_CHOICES = (2, 3, 4, 5, 6, 7, 8)
+# 分群依據：整頁，或查詢詞前後文 (網頁的導覽列、側欄很多，整頁容易分出「哪個網站」而不是詞義)
+CONTEXT_PAGE, CONTEXT_QUERY = "page", "ctx"
+CONTEXT_NAMES = {CONTEXT_PAGE: "分群依據：整頁", CONTEXT_QUERY: "分群依據：查詢詞前後文"}
 
 
 # ---------------------------------------------------------------- 文件內容 (WARC)
@@ -178,7 +188,7 @@ CSS = """
 :root{--bg:#f6f7f9;--fg:#1c2330;--muted:#667085;--card:#fff;--line:#e3e6eb;--accent:#2455d8;--mark:#ffe58a;--warn:#fff4d6;--warnfg:#6b4e00}
 @media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#e6e9ee;--muted:#9aa3b2;--card:#1d2128;--line:#2c323b;--accent:#7ea2ff;--mark:#6b5600;--warn:#3a3014;--warnfg:#f2d98a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif}
-main{max-width:820px;margin:0 auto;padding:24px 16px 60px}
+main{max-width:1100px;margin:0 auto;padding:24px 16px 60px}
 h1{font-size:22px;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 18px}
 form.search{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
 input[type=text]{flex:1 1 320px;padding:10px 12px;font-size:16px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
@@ -200,27 +210,49 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 def page(title, body):
     return (f"<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>"
             f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body><main>{body}</main></body></html>")
+            f"<title>{html.escape(title)}</title><style>{CSS}{clustering.CLUSTER_CSS}</style></head><body><main>{body}</main></body></html>")
 
 
 class App:
     def __init__(self, top, weighting, champion, store):
         self.top, self.weighting, self.champion, self.store = top, weighting, champion, store
 
-    def search_form(self, q, weighting, top):
+    # ------------------------------------------------ 網址
+    def view_url(self, q, weighting, top, cm, k, cl=None, apply=False, cx=CONTEXT_PAGE):
+        """同一個搜尋畫面的網址 (保留權重、筆數、分群方法與群數；cl 是只看某一群)。"""
+        parts = [f"q={requests_quote(q)}", f"weighting={weighting}", f"top={top}", f"cm={cm}", f"cx={cx}"]
+        if k:
+            parts.append(f"k={k}")
+        if cl is not None:
+            parts.append(f"cl={cl}")
+        if apply:
+            parts.append("apply=1")
+        return "/?" + "&".join(parts)
+
+    def search_form(self, q, weighting, top, cm, k, cx=CONTEXT_PAGE):
         weight_options = "".join(
             f"<option value='{w}'{' selected' if w == weighting else ''}>{w}</option>"
             for w in Search.WEIGHTING_SCHEMES)
         top_options = "".join(
             f"<option value='{n}'{' selected' if n == top else ''}>前 {n} 名</option>"
             for n in sorted(set(TOP_CHOICES) | {top}))
+        cluster_options = "".join(
+            f"<option value='{c}'{' selected' if c == cm else ''}>"
+            f"{'不分群' if c == CLUSTER_OFF else '分群：' + clustering.METHOD_NAMES[c]}</option>"
+            for c in CLUSTER_CHOICES)
+        context_options = "".join(
+            f"<option value='{c}'{' selected' if c == cx else ''}>{name}</option>" for c, name in CONTEXT_NAMES.items())
+        k_options = "<option value=''>群數：自動</option>" + "".join(
+            f"<option value='{n}'{' selected' if n == k else ''}>{n} 群</option>" for n in K_CHOICES)
         examples = " ".join(
-            f"<a href='/?q={html.escape(requests_quote(e))}&weighting={weighting}&top={top}'>{html.escape(e)}</a>"
+            f"<a href='/?q={html.escape(requests_quote(e))}&weighting={weighting}&top={top}&cm={cm}&cx={cx}'>{html.escape(e)}</a>"
             for e in EXAMPLES)
         return (f"<h1>IR HW2 搜尋</h1><p class='sub'>向量空間模型 (TF-IDF + cosine)，索引來自 HW1，共 {Search.TOTAL_DOCS:,} 篇</p>"
                 f"<form class='search' action='/' method='get'>"
                 f"<input type='text' name='q' value='{html.escape(q, quote=True)}' placeholder='例如：hong AND NOT kong' autofocus>"
                 f"<select name='weighting'>{weight_options}</select><select name='top'>{top_options}</select>"
+                f"<select name='cm'>{cluster_options}</select><select name='cx'>{context_options}</select>"
+                f"<select name='k'>{k_options}</select>"
                 f"<button type='submit'>搜尋</button></form><div class='examples'>範例：{examples}</div>")
 
     def home(self, params):
@@ -232,14 +264,30 @@ class App:
             top = max(1, min(500, int(params.get("top", [self.top])[0])))
         except ValueError:
             top = self.top
+        cm = params.get("cm", [CLUSTER_METHOD])[0]
+        if cm not in CLUSTER_CHOICES:
+            cm = CLUSTER_METHOD
+        try:
+            k = int(params.get("k", [""])[0] or 0)
+        except ValueError:
+            k = 0
+        k = k if k in K_CHOICES else None
+        cx = params.get("cx", [CONTEXT_PAGE])[0]
+        if cx not in CONTEXT_NAMES:
+            cx = CONTEXT_PAGE
+        try:
+            cl = int(params["cl"][0]) if "cl" in params else None
+        except ValueError:
+            cl = None
         apply_suggestions = params.get("apply", ["0"])[0] == "1"
 
-        body = [self.search_form(q, weighting, top)]
+        body = [self.search_form(q, weighting, top, cm, k, cx)]
         if q:
-            body.append(self.results(q, weighting, top, apply_suggestions))
+            body.append(self.results(q, weighting, top, apply_suggestions, cm, k, cl, cx))
         return page("IR HW2 搜尋" if not q else f"{q} - IR HW2 搜尋", "".join(body))
 
-    def results(self, q, weighting, top, apply_suggestions):
+    # ------------------------------------------------ 結果頁
+    def results(self, q, weighting, top, apply_suggestions, cm=CLUSTER_OFF, k=None, cl=None, cx=CONTEXT_PAGE):
         started = time.perf_counter()
         try:
             results, suggestions, notes = Search.search(
@@ -257,37 +305,94 @@ class App:
             if apply_suggestions:
                 parts.append(f"<div class='notice'>已套用拼字建議：{lines}</div>")
             else:
-                link = f"/?q={requests_quote(q)}&weighting={weighting}&top={top}&apply=1"
+                link = self.view_url(q, weighting, top, cm, k, apply=True, cx=cx)
                 parts.append(f"<div class='notice'>拼字建議：{lines} — <a href='{html.escape(link)}'>改用第一個建議搜尋</a></div>")
 
+        terms = query_terms_for_highlight(q, suggestions)
+        # 分群：只對排名前 CLUSTER_TOP_N 篇做 (顯示筆數不影響分群範圍)
+        analysis, surface, selected, no_structure_notice = None, {}, None, ""
+        if cm != CLUSTER_OFF and results:
+            if clustering.is_ready():
+                context_kwargs = {}
+                if cx == CONTEXT_QUERY:             # 只取查詢詞前後文分群：需要文件內文 (WARC 摘要資料)
+                    if self.store.ready:
+                        context_kwargs = dict(query_terms=frozenset(terms),
+                                              get_text=lambda d: (self.store.get(d) or (None, None))[1])
+                    else:
+                        parts.append("<div class='notice'>前後文分群需要文件內文 (WARC 還在掃描)，這次先用整頁分群。</div>")
+                analysis = clustering.analyze([doc_id for doc_id, _ in results[:CLUSTER_TOP_N]], cm, k, **context_kwargs)
+                if analysis["no_structure"]:        # 分不出明顯的群：不畫側欄與散佈圖，只在結果上方提示
+                    no_structure_notice = clustering.render_no_structure(analysis)
+                    analysis = None
+                else:
+                    surface = clustering.surface_forms(
+                        analysis, lambda d: (self.store.get(d) or (None, None))[1] if self.store.ready else None)
+                    if cl is not None and 0 <= cl < len(analysis["clusters"]):
+                        selected = cl
+            else:
+                parts.append("<div class='notice'>分群功能準備中 (正在建立文件向量)，稍後重新整理即可。</div>")
+
         mode = "，champion list 近似計分" if self.champion is not None else ""
-        parts.append(f"<div class='meta'>命中 {len(results):,} 篇，顯示前 {min(top, len(results))} 名 · "
+        if selected is not None:
+            shown = analysis["clusters"][selected]["doc_ids"]
+            shown_text = f"群 {selected} 的 {len(shown)} 篇"
+        else:
+            shown = [doc_id for doc_id, _ in results[:top]]
+            shown_text = f"顯示前 {min(top, len(results))} 名"
+        parts.append(f"<div class='meta'>命中 {len(results):,} 篇，{shown_text} · "
                      f"{weighting}{mode} · {elapsed:.0f} ms</div>")
+        parts.append(no_structure_notice)
         if not results:
             parts.append("<div class='empty'>找不到符合的搜尋結果。</div>")
             return "".join(parts)
 
-        terms = query_terms_for_highlight(q, suggestions)
-        for rank, (doc_id, score) in enumerate(results[:top], 1):
+        scores = dict(results[:max(top, CLUSTER_TOP_N)])
+        rank_of = {doc_id: rank for rank, (doc_id, _) in enumerate(results[:max(top, CLUSTER_TOP_N)], 1)}
+        assignment = analysis["assignment"] if analysis else {}
+
+        def doc_link(doc_id):
+            link = f"/doc?id={requests_quote(doc_id)}&q={requests_quote(q)}" + ("&apply=1" if apply_suggestions else "")
+            back = self.view_url(q, weighting, top, cm, k, selected, apply_suggestions, cx)
+            return f"{link}&ret={requests_quote(back)}"
+
+        cards = []
+        for doc_id in shown:
+            rank, score = rank_of[doc_id], scores[doc_id]
             doc = self.store.get(doc_id) if self.store.ready else None
             title = (doc[0] if doc and doc[0] else doc_id)
             snippet = make_snippet(doc[1], terms) if doc else ""
-            link = f"/doc?id={requests_quote(doc_id)}&q={requests_quote(q)}" + ("&apply=1" if apply_suggestions else "")
-            parts.append(
-                f"<div class='result'><span class='score'>{score:.6f}</span>"
-                f"<div class='title'>{rank}. <a href='{html.escape(link)}'>{highlight(title[:120], terms)}</a></div>"
-                f"<div class='id'>{html.escape(doc_id)}</div>"
+            style, chip, css = "", "", ""
+            info = clustering.doc_cluster_info(analysis, doc_id, surface) if analysis else None
+            if info:
+                cluster_id, color, label = info
+                style, css = f" style='border-left-color:{color}'", " clustered"
+                chip = f"<span class='chip'>群 {cluster_id}：{html.escape(label)}</span>"
+            cards.append(
+                f"<div class='result{css}'{style}><span class='score'>{score:.6f}</span>"
+                f"<div class='title'>{rank}. <a href='{html.escape(doc_link(doc_id))}'>{highlight(title[:120], terms)}</a></div>"
+                f"<div class='id'>{html.escape(doc_id)}{chip}</div>"
                 + (f"<div class='snippet'>{snippet}</div>" if snippet else "") + "</div>")
         if not self.store.ready:
-            parts.append("<div class='meta'>(" + ("摘要尚未準備好：正在掃描 WARC 檔，稍後重新整理即可。" if self.store.available
-                                                    else "找不到 WARC 檔，因此不顯示摘要。") + ")</div>")
-        return "".join(parts)
+            cards.append("<div class='meta'>(" + ("摘要尚未準備好：正在掃描 WARC 檔，稍後重新整理即可。" if self.store.available
+                                                else "找不到 WARC 檔，因此不顯示摘要。") + ")</div>")
+
+        if analysis is None or not analysis["clusters"]:
+            return "".join(parts) + "".join(cards)
+        sidebar = clustering.render_sidebar(
+            analysis,
+            lambda cluster_id: self.view_url(q, weighting, top, cm, k, cluster_id, apply_suggestions, cx),
+            selected, surface)
+        titles = {d: (self.store.get(d) or ("", ""))[0] for d in analysis["assignment"]} if self.store.ready else {}
+        plot = clustering.render_scatter(analysis, doc_link, selected, titles, rank_of, surface)
+        return "".join(parts) + f"<div class='layout'>{sidebar}<section>{plot}{''.join(cards)}</section></div>"
 
     def document(self, params):
         doc_id = params.get("id", [""])[0]
         q = params.get("q", [""])[0]
         doc = self.store.get(doc_id) if self.store.ready else None
-        back = f"/?q={requests_quote(q)}"
+        ret = params.get("ret", [""])[0]
+        # 回到原本的搜尋畫面 (含分群與篩選)；只接受站內的 /?... 網址
+        back = ret if ret.startswith("/?") else f"/?q={requests_quote(q)}"
         if doc is None:
             return page("找不到文件", f"<p><a href='{html.escape(back)}'>← 回搜尋結果</a></p><div class='empty'>找不到文件 {html.escape(doc_id)} 的內容。</div>")
         suggestions = {}
@@ -352,6 +457,13 @@ if __name__ == "__main__":
     if args.champion is not None:
         count = Search.build_champion_lists(args.champion, args.weighting)
         print(f"champion list 建立完成：{count} 個詞 (每個保留貢獻最大的 {args.champion} 篇)")
+
+    if not hasattr(Search, "get_doc_vector"):   # 還沒有 get_doc_vector 時，先在背景建好分群用的文件矩陣
+        def build_cluster_matrix():
+            started = time.perf_counter()
+            clustering.build_doc_matrix()
+            print(f"分群用的文件向量建立完成 ({time.perf_counter() - started:.1f} 秒)")
+        threading.Thread(target=build_cluster_matrix, daemon=True).start()
 
     store = DocStore(WARC_FILE_PATH)
     if store.available:

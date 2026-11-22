@@ -23,7 +23,7 @@ OUTPUT_FILE_NAME = "HW2.txt"
 OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
 
 # 網頁介面 (WebApp.py) 顯示摘要與全文用的 HW1 WARC 檔；找不到時網頁仍可搜尋，只是沒有摘要
-WARC_FILE_PATH = os.path.join(os.path.dirname(BASE_DIR), "hw1", "02.warc")
+WARC_FILE_PATH = os.path.join(os.path.dirname(BASE_DIR), "final_project", "02.warc")
 
 # 預設權重/排序方案 (可用命令列 --weighting 覆蓋)：
 #   tfidf     : 作業指定公式 (1 + log tf) * log(N/df)，cosine similarity
@@ -37,3 +37,13 @@ BM25_B = 0.75
 
 # 萬用字元 (*) 展開後最多保留幾個索引詞 (取 df 最高者)，避免 a* 這類查詢展開成數萬個詞
 WILDCARD_MAX_TERMS = 50
+
+# ---- 模組 B：結果分群與視覺化 (clustering.py) ----
+CLUSTER_TOP_N = 100            # 對排名前 N 篇結果分群
+CLUSTER_METHOD = "kmeans"      # kmeans 或 hier
+CLUSTER_K_MIN = 2              # 自動選群數 (silhouette) 的範圍
+CLUSTER_K_MAX = 6
+CLUSTER_LABEL_TERMS = 3        # 群標籤用幾個詞
+CLUSTER_MIN_SILHOUETTE = 0.05  # 自動選群數時，最佳 silhouette 低於此值就不分群
+CLUSTER_MIN_SIZE = 3           # 自動選群數時，每群至少幾篇 (與前 N 篇的 5% 取大者)
+CLUSTER_CONTEXT_WINDOW = 15    # 「查詢詞前後文」分群：查詢詞前後各取幾個詞
