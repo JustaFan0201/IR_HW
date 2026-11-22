@@ -37,3 +37,12 @@ BM25_B = 0.75
 
 # 萬用字元 (*) 展開後最多保留幾個索引詞 (取 df 最高者)，避免 a* 這類查詢展開成數萬個詞
 WILDCARD_MAX_TERMS = 50
+
+# feedback.py 設定參數
+# Rocchio 演算法參數
+ROCCHIO_ALPHA = 1.0  # 原始查詢向量權重
+ROCCHIO_BETA = 0.75  # 相關文件向量權重
+ROCCHIO_GAMMA = 0.15 # 不相關文件向量權重
+
+# 盲目相關回饋 (PRF) 擴展詞數量
+EXPAND_TERMS_M = 5
