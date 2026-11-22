@@ -661,7 +661,13 @@ def positive_int(value):
     return number
 
 def get_doc_vector(doc_id: str) -> dict[str, float]:
-    """回傳指定文件向量 {term: tfidf_weight}"""
+    """回傳指定文件向量 {term: tfidf_weight}
+
+    註：呼叫前必須先執行 Search.load_index() 載入索引，
+    否則會丟出 RuntimeError。
+    """
+    if not inverted_index:
+        raise RuntimeError("尚未呼叫 Search.load_index()，索引是空的")
     doc_vec = {}
     for term in doc_terms_cache.get(doc_id, []):
         entry = inverted_index[term]
