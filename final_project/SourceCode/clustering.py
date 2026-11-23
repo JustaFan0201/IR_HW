@@ -26,6 +26,7 @@ cluster() 的每個 dict 另外有 "terms" (標籤的詞幹串列) 與 "size"，
 import argparse
 import html
 import math
+import re
 import threading
 import time
 from array import array
@@ -36,14 +37,15 @@ from scipy import sparse
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 
-from config import (CLUSTER_K_MAX, CLUSTER_K_MIN, CLUSTER_LABEL_TERMS,
-                    CLUSTER_METHOD, CLUSTER_TOP_N, CLUSTER_MIN_SILHOUETTE,
-                    CLUSTER_MIN_SIZE, CLUSTER_CONTEXT_WINDOW)
+from config import (CLUSTER_TOP_N, CLUSTER_METHOD, CLUSTER_K_MIN, CLUSTER_K_MAX,
+                    CLUSTER_LABEL_TERMS, CLUSTER_MIN_SILHOUETTE, CLUSTER_MIN_SIZE, CLUSTER_CONTEXT_WINDOW)
 import Search
-from analyzer import token_spans
+from analyzer import STOPWORDS, _TOKEN_RE, _stem, token_spans
 
 # 前後文分群時，每篇文件最多讀前多少字元
 _CONTEXT_MAX_CHARS = 60000
+# 群標籤不用 df 超過全部文件這個比例的詞
+_LABEL_MAX_DF = 0.2
 # 前 N 篇至少要有幾篇才做「丟掉只出現在 1 篇的詞」
 _PRUNE_MIN_DOCS = 10
 
@@ -130,36 +132,65 @@ def _submatrix_from_vectors(doc_ids):
     return _matrix_from_dicts(ids, vectors)
 
 
-def _whole_doc_vector(doc_id):
-    """整篇文件的 {詞: 權重}；取不到回傳 None。前後文分群時，找不到查詢詞的文件用它代替。"""
-    if hasattr(Search, "get_doc_vector"):
-        try:
-            return Search.get_doc_vector(doc_id)
-        except KeyError:
-            return None
-    if not _state["ready"]:
-        build_doc_matrix()
-    row = _state["doc_index"].get(doc_id)
-    if row is None:
-        return None
-    matrix, terms = _state["matrix"], _state["terms"]
-    start, end = matrix.indptr[row], matrix.indptr[row + 1]
-    return {terms[c]: float(v) for c, v in zip(matrix.indices[start:end], matrix.data[start:end])}
+def _hit_pattern(query_terms):
+    """在小寫文字裡粗略找出查詢詞出現位置的正規表示式 (比對詞幹的前綴 + 任意後綴；Porter 詞幹常只改字尾，
+    例如 family -> famili，所以詞幹 4 個字元以上時少取最後一個字元)。只用來挑出要切詞的片段，找到後仍會用詞幹確認。"""
+    prefixes = sorted({re.escape(q[:max(3, len(q) - 1)] if len(q) > 3 else q) for q in query_terms})
+    return re.compile(r"\b(?:" + "|".join(prefixes) + r")\w*")
+
+
+_pattern_cache = {}
+
+
+def _window_counts(tokens, query_terms, window):
+    """tokens (小寫的 token 串列) 裡，查詢詞前後各 window 個 token 的詞幹計數 (重疊的視窗只算一次，查詢詞本身不算)。"""
+    firsts = {q[0] for q in query_terms}         # Porter 詞幹還原不會改第一個字元，先用它擋掉絕大多數 token
+    forms = {t for t in set(tokens) if t[0] in firsts and t not in STOPWORDS and _stem(t) in query_terms}
+    ranges = []                                  # 合併重疊的視窗 [低, 高)
+    for i, t in enumerate(tokens):
+        if t in forms:
+            low, high = max(0, i - window), min(len(tokens), i + window + 1)
+            if ranges and low <= ranges[-1][1]:
+                ranges[-1][1] = max(ranges[-1][1], high)
+            else:
+                ranges.append([low, high])
+    surface = Counter()
+    for low, high in ranges:
+        surface.update(tokens[low:high])
+    counts = Counter()
+    for token, tf in surface.items():
+        if token not in STOPWORDS:
+            stem = _stem(token)
+            if stem not in query_terms:
+                counts[stem] += tf
+    return counts, bool(ranges)
 
 
 def _context_vector(text, query_terms, window):
     """查詢詞每次出現位置前後各 window 個詞 (token) 的 TF-IDF 向量 {詞: 權重}，查詢詞本身不算；
-    文字裡找不到查詢詞時回傳 None。tf-idf 的 idf 用整個索引的 df，與整頁向量一致。"""
-    tokens = [stem for _, _, stem in token_spans(text[:_CONTEXT_MAX_CHARS])]
-    hits = [i for i, stem in enumerate(tokens) if stem in query_terms]
-    if not hits:
+    文字裡找不到查詢詞時回傳 None。tf-idf 的 idf 用整個索引的 df，與整頁向量一致。
+    切詞是主要成本 (一頁幾千個 token)，所以先用正規表示式粗略找出查詢詞的位置，
+    只對每個出現位置前後各 window * 30 個字元的片段切詞 (靠得近的合併成一段)。"""
+    text = text[:_CONTEXT_MAX_CHARS].lower()
+    query_terms = frozenset(query_terms)
+    pattern = _pattern_cache.get(query_terms)
+    if pattern is None:
+        pattern = _pattern_cache[query_terms] = _hit_pattern(query_terms)
+    margin = window * 30
+    groups = []                                  # [片段起, 片段迄)，靠得近的命中合併
+    for match in pattern.finditer(text):
+        low, high = max(0, match.start() - margin), min(len(text), match.end() + margin)
+        if groups and low <= groups[-1][1]:
+            groups[-1][1] = high
+        else:
+            groups.append([low, high])
+    counts, found = Counter(), False
+    for low, high in groups:
+        part, hit = _window_counts(_TOKEN_RE.findall(text[low:high]), query_terms, window)
+        counts.update(part)
+        found = found or hit
+    if not found:
         return None
-    keep = bytearray(len(tokens))
-    for i in hits:
-        low, high = max(0, i - window), min(len(tokens), i + window + 1)
-        keep[low:high] = b"\x01" * (high - low)
-    counts = Counter(stem for stem, flag in zip(tokens, keep)
-                     if flag and stem is not None and stem not in query_terms)
     vector = {}
     for term, tf in counts.items():
         entry = Search.inverted_index.get(term)
@@ -171,21 +202,16 @@ def _context_vector(text, query_terms, window):
 
 
 def _submatrix_context(doc_ids, query_terms, get_text, window):
-    """前後文版的 _submatrix：回傳 (保留的 doc_ids, X, 詞, 有找到查詢詞的文件數)。
-    get_text(doc_id) 取不到內文，或內文裡找不到查詢詞的文件，退回用整頁向量。"""
-    ids, vectors, with_context = [], [], 0
+    """前後文版的 _submatrix：回傳 (保留的 doc_ids, X, 詞)。
+    取不到內文、或內文裡找不到查詢詞的文件不分群 (用整頁向量補上會被導覽列、側欄帶走，自己聚成「網站群」)。"""
+    ids, vectors = [], []
     for doc_id in doc_ids:
         text = get_text(doc_id)
         vector = _context_vector(text, query_terms, window) if text else None
         if vector:
-            with_context += 1
-        else:
-            vector = _whole_doc_vector(doc_id)
-        if vector:
             ids.append(doc_id)
             vectors.append(vector)
-    kept, X, terms = _matrix_from_dicts(ids, vectors)
-    return kept, X, terms, with_context
+    return _matrix_from_dicts(ids, vectors)
 
 
 def _submatrix(doc_ids):
@@ -325,11 +351,22 @@ def _choose_k(labeler, distance, k_fixed, k_min, k_max, min_size):
 
 def _label_terms(X, terms, labels, count, contrast):
     """每群回傳最多 count 個詞幹：群中心權重最高的詞。contrast=True 時先扣掉全體中心。
-    候選詞：只含英文字母與數字 (ASCII)、不是純數字，而且要在群內至少 30% 的文件出現 (最少 2 篇；
-    群只有 1 篇時不限)，免得只出現在單一網站的怪詞 (人名、代號、亂碼) 變成標籤。
-    一個合格的詞都沒有時，才退一步改成「至少 2 篇」。"""
+    候選詞：只含英文字母與數字 (ASCII)、不是純數字、不是到處都有的詞 (df 超過全部文件的 20%)，
+    而且要在群內至少 30% 的文件出現 (最少 2 篇；群只有 1 篇時不限)，免得只出現在單一網站的怪詞
+    (人名、代號、亂碼) 或 new、more 這類泛詞變成標籤。
+    一個合格的詞都沒有時依序放寬：先改成「至少 2 篇」，再放寬「到處都有的詞」的限制。"""
     overall = np.asarray(X.mean(axis=0)).ravel()
-    allowed = np.array([term.isascii() and term.isalnum() and not term.isdigit() for term in terms])
+    common_limit = _LABEL_MAX_DF * Search.TOTAL_DOCS
+
+    def plain(term):
+        return term.isascii() and term.isalnum() and not term.isdigit()
+
+    def rare_enough(term):
+        entry = Search.inverted_index.get(term)
+        return entry is None or entry["df"] <= common_limit
+
+    plain_mask = np.array([plain(term) for term in terms])
+    strict_mask = plain_mask & np.array([rare_enough(term) for term in terms])
     result = []
     for cluster_id in sorted(set(labels.tolist())):
         members = np.flatnonzero(labels == cluster_id)
@@ -340,12 +377,14 @@ def _label_terms(X, terms, labels, count, contrast):
         in_cluster_docs = sub.getnnz(axis=0)
         need = max(2, math.ceil(0.3 * len(members))) if len(members) > 1 else 1
 
-        def pick(minimum):
-            masked = np.where(allowed & (in_cluster_docs >= minimum), score, -np.inf)
+        def pick(mask, minimum):
+            masked = np.where(mask & (in_cluster_docs >= minimum), score, -np.inf)
             top = np.argsort(-masked)[:count]
             return [terms[i] for i in top if masked[i] > 0]
 
-        result.append(pick(need) or pick(min(2, len(members))))
+        relaxed = min(2, len(members))
+        result.append(pick(strict_mask, need) or pick(strict_mask, relaxed)
+                      or pick(plain_mask, need) or pick(plain_mask, relaxed))
     return result
 
 
@@ -376,7 +415,8 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
         assignment: {doc_id: 群編號}
     doc_ids 要依排名由高到低給，群內文件才會保持排名順序。
     前後文分群：query_terms (查詢詞幹的集合) 與 get_text (doc_id -> 內文或 None) 都有給才啟用，window 預設
-    CLUSTER_CONTEXT_WINDOW；結果多一個 "context": {window, docs_with_hits, docs}，整頁分群時為 None。"""
+    CLUSTER_CONTEXT_WINDOW；結果多一個 "context": {window, docs_with_hits, docs}，整頁分群時為 None。
+    內文裡找不到查詢詞的文件不分群 (不在 clusters / points / assignment 裡)；找得到的不到 3 篇時 no_structure 為 True。"""
     if method not in METHODS:
         raise ValueError(f"未知的分群方法：{method}")
     context = bool(query_terms) and get_text is not None
@@ -390,8 +430,8 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
     started = time.perf_counter()
     context_info = None
     if context:
-        kept, X, terms, with_context = _submatrix_context(doc_ids, frozenset(query_terms), get_text, window)
-        context_info = {"window": window, "docs_with_hits": with_context, "docs": len(kept)}
+        kept, X, terms = _submatrix_context(doc_ids, frozenset(query_terms), get_text, window)
+        context_info = {"window": window, "docs_with_hits": len(kept), "docs": len(doc_ids)}
     else:
         kept, X, terms = _submatrix(doc_ids)
     X, terms = _prune_rare_terms(X, terms)
@@ -434,6 +474,8 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
         result["points"] = [(kept[i], float(coords[i, 0]), float(coords[i, 1]), int(labels[i]))
                             for i in range(n)]
         result["assignment"] = {kept[i]: int(labels[i]) for i in range(n)}
+    if context and n < 3:                       # 找得到查詢詞的文件太少，沒辦法分群
+        result["no_structure"] = True
     result.setdefault("timing_ms", {"vectors": 0.0, "cluster": 0.0, "project": 0.0})
     result["elapsed_ms"] = (time.perf_counter() - started) * 1000
 
@@ -576,7 +618,11 @@ def doc_cluster_info(analysis, doc_id, surface=None):
 
 
 def no_structure_text(analysis):
-    """自動選群數卻分不出明顯的群時的說明文字 (analysis["no_structure"] 為 True 時使用)。"""
+    """分不出群時的說明文字 (analysis["no_structure"] 為 True 時使用)。"""
+    context = analysis.get("context")
+    if context and context["docs_with_hits"] < 3:
+        return (f"前後文分群需要在文件內文裡找到查詢詞，前 {context['docs']} 篇只有 {context['docs_with_hits']} 篇找到，"
+                f"因此不分群。")
     detail = ""
     if analysis.get("rejected_silhouette") is not None:
         detail = f" (最佳 silhouette {analysis['rejected_silhouette']:.2f}，低於門檻 {CLUSTER_MIN_SILHOUETTE})"
@@ -594,8 +640,12 @@ def render_sidebar(analysis, link, selected=None, surface=None):
     silhouette = "" if analysis["silhouette"] is None else f"，silhouette {analysis['silhouette']:.2f}"
     total = len(analysis["assignment"])
     context = analysis.get("context")
-    context_line = (f"<br>依查詢詞前後文 ±{context['window']} 詞 ({context['docs_with_hits']}/{context['docs']} 篇找到查詢詞)"
-                    if context else "")
+    context_line = ""
+    if context:
+        left_out = context["docs"] - context["docs_with_hits"]
+        context_line = (f"<br>依查詢詞前後文 ±{context['window']} 詞，{context['docs_with_hits']}/{context['docs']} 篇找到查詢詞"
+                        + (f"，其餘 {left_out} 篇不分群" if left_out else "")
+                        + f" (讀文與切詞 {analysis['timing_ms']['vectors']:.0f} ms)")
     items = [f"<li><a class='cl{' active' if selected is None else ''}' href='{html.escape(link(None))}'>"
              f"<span class='sw all'></span><span class='cl-label'>全部</span><span class='n'>{total}</span></a></li>"]
     for c in analysis["clusters"]:

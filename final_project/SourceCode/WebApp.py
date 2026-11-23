@@ -42,8 +42,10 @@ CONTEXT_NAMES = {CONTEXT_PAGE: "分群依據：整頁", CONTEXT_QUERY: "分群�
 # ---------------------------------------------------------------- 文件內容 (WARC)
 
 class _TextExtractor(HTMLParser):
-    """把 HTML 轉成純文字；script / style / meta / noscript 不算內文，與 HW1 的處理一致。"""
-    SKIP = {"script", "style", "meta", "noscript"}
+    """把 HTML 轉成純文字；script / style / noscript 的內容不算內文，與 HW1 的處理一致。"""
+    # meta 是沒有結束標籤的元素 (<meta ...> 不會有 </meta>)，放在 SKIP 裡計數器永遠減不回來，
+    # 導致 <meta> 之後的內文全部被略過；meta 本來就沒有文字內容，不需要略過。
+    SKIP = {"script", "style", "noscript"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
