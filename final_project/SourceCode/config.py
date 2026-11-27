@@ -47,7 +47,7 @@ ROCCHIO_GAMMA = 0.15 # 不相關文件向量權重
 # 盲目相關回饋 (PRF) 擴展詞數量
 EXPAND_TERMS_M = 5
 
-# ---- 模組 B：結果分群與視覺化 (clustering.py) ----
+# clustering.py 參數 ----
 CLUSTER_TOP_N = 100            # 對排名前 N 篇結果分群
 CLUSTER_METHOD = "kmeans"      # kmeans 或 hier
 CLUSTER_K_MIN = 2              # 自動選群數 (silhouette) 的範圍
