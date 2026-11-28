@@ -10,15 +10,14 @@
 """
 import argparse
 import html
-import os
 import re
 import threading
 import time
-from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import Search
+from docs import DocStore
 from analyzer import analyze, token_spans
 from config import BASE_DIR, DEFAULT_WEIGHTING, TOP_K, WARC_FILE_PATH
 
@@ -27,108 +26,6 @@ FULL_TEXT_CHARS = 100_000
 TOP_CHOICES = (10, 20, 50, 100)
 EXAMPLES = ['airplanes', 'United States government', 'hong AND NOT kong', '"hong kong"~5',
             'govern*', 'goverment', 'mikrosoft']
-
-
-# ---------------------------------------------------------------- 文件內容 (WARC)
-
-class _TextExtractor(HTMLParser):
-    """把 HTML 轉成純文字；script / style / meta / noscript 不算內文，與 HW1 的處理一致。"""
-    SKIP = {"script", "style", "meta", "noscript"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts, self.title, self._skip, self._in_title = [], "", 0, False
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self._skip += 1
-        elif tag == "title":
-            self._in_title = True
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP and self._skip:
-            self._skip -= 1
-        elif tag == "title":
-            self._in_title = False
-
-    def handle_data(self, data):
-        if self._skip:
-            return
-        data = data.strip()
-        if not data:
-            return
-        if self._in_title and not self.title:
-            self.title = data
-        self.parts.append(data)
-
-
-def html_to_text(block):
-    """去掉 HTTP 標頭後轉文字，回傳 (標題, 內文)。"""
-    _, sep, body = block.partition(b"\r\n\r\n")
-    if not sep:
-        _, sep, body = block.partition(b"\n\n")
-        if not sep:
-            body = block
-    parser = _TextExtractor()
-    try:
-        parser.feed(body.decode("utf-8", "replace"))
-    except Exception:
-        pass
-    return parser.title, " ".join(parser.parts)
-
-
-class DocStore:
-    """掃一次 WARC 記下每篇文件的位置 (只 seek 不讀內容)，之後依 docID 取出文字。"""
-
-    def __init__(self, path):
-        self.path = path
-        self.offsets = {}  # docID -> (內容起點, 長度)
-        self.ready = False
-        self.available = os.path.exists(path)
-        self._cache = {}
-        self._lock = threading.Lock()
-
-    def scan(self):
-        if not self.available:
-            return
-        with open(self.path, "rb") as f:
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                if not line.startswith(b"WARC/"):
-                    continue
-                header = {}
-                while True:
-                    h = f.readline()
-                    if h in (b"\r\n", b"\n", b""):
-                        break
-                    key, _, value = h.partition(b":")
-                    header[key.strip().decode("ascii", "ignore")] = value.strip().decode("utf-8", "ignore")
-                length = int(header.get("Content-Length", 0))
-                if header.get("WARC-Type") == "response":
-                    doc_id = header.get("WARC-TREC-ID") or header.get("WARC-Record-ID")
-                    self.offsets[doc_id] = (f.tell(), length)
-                f.seek(length, os.SEEK_CUR)
-        self.ready = True
-
-    def get(self, doc_id):
-        """回傳 (標題, 內文)；取不到回傳 None。"""
-        with self._lock:
-            if doc_id in self._cache:
-                return self._cache[doc_id]
-        location = self.offsets.get(doc_id)
-        if location is None:
-            return None
-        with open(self.path, "rb") as f:
-            f.seek(location[0])
-            block = f.read(location[1])
-        result = html_to_text(block)
-        with self._lock:
-            if len(self._cache) > 200:
-                self._cache.clear()
-            self._cache[doc_id] = result
-        return result
 
 
 # ---------------------------------------------------------------- 標示查詢詞
