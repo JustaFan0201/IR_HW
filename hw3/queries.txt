@@ -1,0 +1,18 @@
+airplanes
+Microsoft
+United States government
+non-profit organization
+hong AND kong
+(arc OR zip) AND stop
+software engineer OR project manager
+the of
+goverment
+"hong kong"
+"hong kong"~5
+"open source" AND linux
+hong AND NOT kong
+govern*
+micro* AND soft*
+smyth
+mikrosoft
+*ernmen*
