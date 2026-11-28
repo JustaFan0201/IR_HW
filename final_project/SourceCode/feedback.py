@@ -77,33 +77,64 @@ def expand_terms(query: str,
 
 def prf(query: str, k: int = TOP_K, fb_docs: int = PRF_DOCS,
         max_vec_terms: int = PRF_MAX_VEC_TERMS,
-        max_df_ratio: float = PRF_MAX_DF_RATIO) -> list[tuple[str, float]]:
+        max_df_ratio: float = PRF_MAX_DF_RATIO,
+        apply_suggestions: bool = True) -> list[tuple[str, float]]:
     """虛擬相關回饋 (Pseudo Relevance Feedback)：
     先搜一次取前 fb_docs 篇，假設它們是相關的，用 Rocchio 改寫查詢後重新搜尋，
     回傳前 k 篇 [(docID, score)]。
 
-    k：最終回傳的篇數 (供 METHODS 介面呼叫，與回饋文件數無關)。
+    兩輪都固定用 tfidf cosine：Rocchio 向量與 Search.rank_by_vector 都是 tfidf 空間，
+    第一輪若用別的權重方案 (如 bm25)，挑出的虛擬相關文件與重排的尺度會不一致，
+    fb_docs <= 0 時回傳的分數也會不在 [0, 1]。
+
+    k：最終回傳的篇數 (供 METHODS 介面呼叫，與回饋文件數無關)；k <= 0 時直接回傳 []。
     fb_docs：當作虛擬相關文件的篇數 (PRF 慣例取少量，預設見 config.PRF_DOCS)；
     <= 0 時視為不做回饋，直接回傳第一輪搜尋結果的前 k 篇。
     max_vec_terms：改寫後的查詢向量 (含原查詢詞) 總詞數上限，避免向量過大拖慢排序。
     max_df_ratio：排除 df 佔總文件數比例超過此值的擴展詞 (太常見/雜訊詞)；
-    原查詢詞不受此限制，一律保留，避免 query drift。
+    使用者字面輸入的查詢詞不受此限制，一律保留，避免 query drift。
+    萬用字元展開出來的詞不算字面查詢詞，視為擴展詞，一樣受 df 過濾與名額競爭，
+    否則 inform* 這類查詢會把 50 個展開詞全部保護起來，沒有名額留給真正的擴充詞。
+    apply_suggestions：True 時比照 Search.search(apply_suggestions=True)，
+    用第一個拼字建議自動替換可疑的查詢詞；False 則不修正。
 
+    索引尚未載入時丟出 RuntimeError (與 Search.get_doc_vector 一致)。
     查詢語法錯誤、只含停用詞、只有 NOT、或萬用字元沒有符合的詞時，
     不會拋出例外，直接回傳 []。
     """
+    if not S.inverted_index:
+        raise RuntimeError("尚未呼叫 Search.load_index()，索引是空的")
+    if k <= 0:
+        return []
+
     try:
         boolean_expression = S.parse_boolean_query(query)
         if boolean_expression is not None:
             query_terms = S.get_boolean_terms(boolean_expression)
-            allowed_doc_ids = S.evaluate_boolean_query(boolean_expression)
+            literal_terms = S.get_boolean_terms(boolean_expression, include_wildcard=False)
         else:
             query_terms = analyze(query)
-            allowed_doc_ids = None
+            literal_terms = query_terms
         if not query_terms:
             return []
 
-        initial_results = S.rank_documents(query_terms, allowed_doc_ids, min_results=max(k, fb_docs))
+        # 拼字修正：只檢查字面詞 (萬用字元展開詞本來就在索引裡)，做法同 Search.search
+        if apply_suggestions:
+            suggestions = S.suggest_spelling_corrections(literal_terms)
+            if suggestions:
+                if boolean_expression is None:
+                    query_terms = [suggestions[t][0] if t in suggestions else t for t in query_terms]
+                    literal_terms = query_terms
+                else:
+                    boolean_expression = S.replace_boolean_terms(boolean_expression, suggestions)
+                    query_terms = S.get_boolean_terms(boolean_expression)
+                    literal_terms = S.get_boolean_terms(boolean_expression, include_wildcard=False)
+
+        allowed_doc_ids = (
+            S.evaluate_boolean_query(boolean_expression) if boolean_expression is not None else None
+        )
+        initial_results = S.rank_documents(query_terms, allowed_doc_ids, weighting="tfidf",
+                                           min_results=max(k, fb_docs))
     except ValueError:
         return []
 
@@ -117,18 +148,21 @@ def prf(query: str, k: int = TOP_K, fb_docs: int = PRF_DOCS,
     query_vec = S.query_vector(query_terms)
     new_query_vec = rocchio(query_vec, rel_ids=top_ids, nonrel_ids=[])
 
-    # 原查詢詞一律保留，df 過濾只套用在 Rocchio 新加入的擴展詞上，避免原查詢詞被濾掉造成 query drift
-    orig_terms = set(query_vec)
+    # 只有字面查詢詞受保護；df 過濾套用在 Rocchio 新加入的詞與萬用字元展開詞上
+    protected_terms = set(literal_terms) & set(query_vec)
     max_df = S.TOTAL_DOCS * max_df_ratio
     filtered = {
         t: w for t, w in new_query_vec.items()
-        if t in orig_terms or (t in S.inverted_index and S.inverted_index[t]["df"] <= max_df)
+        if t in protected_terms or (t in S.inverted_index and S.inverted_index[t]["df"] <= max_df)
     }
+    if not filtered:
+        # 過濾後什麼都不剩 (例如純萬用字元查詢且展開詞全是高 df)，退回第一輪結果
+        return initial_results[:k]
 
-    # 截斷總詞數到 max_vec_terms：原查詢詞不參與排名、直接保留，剩餘名額才給擴展詞依權重競爭
+    # 截斷總詞數到 max_vec_terms：字面查詢詞直接保留，剩餘名額才給其他詞依權重競爭
     if len(filtered) > max_vec_terms:
-        protected = {t: w for t, w in filtered.items() if t in orig_terms}
-        expandable = {t: w for t, w in filtered.items() if t not in orig_terms}
+        protected = {t: w for t, w in filtered.items() if t in protected_terms}
+        expandable = {t: w for t, w in filtered.items() if t not in protected_terms}
         remaining_slots = max(0, max_vec_terms - len(protected))
         top_expandable = sorted(expandable.items(), key=lambda x: x[1], reverse=True)[:remaining_slots]
         filtered = {**protected, **dict(top_expandable)}
