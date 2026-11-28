@@ -12,6 +12,7 @@
 所以分數是「相對值」，可以比大小，但不要拿來跟其他方案的分數直接比較。
 |d| 用索引中的詞數 (doc_token_counts，已去除停用詞)，與 BM25 的文件長度一致。
 """
+import argparse
 import math
 from collections import Counter
 
@@ -37,8 +38,18 @@ def _collection_freq(term):
     return cf
 
 
+def positive_float(value):
+    """argparse 用：只接受大於 0 的數字 (mu = 0 會除以零)。"""
+    number = float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"mu 必須大於 0，收到 {value}")
+    return number
+
+
 def rank_lm(query_terms, mu=DEFAULT_MU, allowed_doc_ids=None):
-    """回傳 [(docID, score)]，分數高到低。不在索引中的查詢詞直接略過。"""
+    """回傳 [(docID, score)]，分數高到低。不在索引中的查詢詞直接略過。mu 必須大於 0。"""
+    if mu <= 0:
+        raise ValueError(f"Dirichlet 平滑參數 mu 必須大於 0，收到 {mu}")
     counts = Counter(t for t in query_terms if t in S.inverted_index)
     if not counts:
         return []
@@ -66,11 +77,9 @@ def search_lm(query, top_k=10, mu=DEFAULT_MU):
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description="Query likelihood (Dirichlet) 檢索")
     parser.add_argument("query")
-    parser.add_argument("--mu", type=float, default=DEFAULT_MU)
+    parser.add_argument("--mu", type=positive_float, default=DEFAULT_MU)
     parser.add_argument("--top", type=int, default=10)
     args = parser.parse_args()
     S.load_index()

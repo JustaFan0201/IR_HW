@@ -4,16 +4,20 @@
 內建：tfidf、tfidf-raw、bm25、lm (query likelihood, Dirichlet)。
 
 A、C 的方法不用改這個檔案。在自己的模組裡放一個 `METHODS = {名稱: fn}`，
-實驗時用 `--plugins 模組名` 載入，例如：
+實驗時用 `--plugins 模組名` 載入 (模組名 = repo 裡的檔名，不含 .py)，例如：
 
-    # SemanticSearch.py (C)
-    from Search import search
+    # semantic.py (C)
     def hybrid(query, k): ...
     METHODS = {"semantic": lambda q, k: semantic_search(q, k), "hybrid": hybrid}
 
-    python RunExperiments.py --plugins SemanticSearch Feedback
+    python SourceCode/RunExperiments.py --plugins semantic feedback
+
+載入失敗 (找不到模組、模組沒有 METHODS) 會直接報錯結束，不會默默只跑 baseline。
+過渡期：模組若還沒有 METHODS 但有 TASKS.md 約定的 `semantic_search(query, k)`，
+會自動以名稱 "semantic" 註冊。
 """
 import importlib
+import sys
 
 import Search as S
 from LMSearch import DEFAULT_MU, search_lm
@@ -45,13 +49,20 @@ def lm_with_mu(mu):
 
 
 def load_plugins(module_names):
-    """匯入其他組員的模組並註冊它們的 METHODS；缺模組時只提醒，不中斷。"""
-    for name in module_names:
+    """匯入其他組員的模組並註冊它們的 METHODS。
+    找不到模組、或模組沒有提供任何方法時直接結束：否則比較表看起來完整，其實只有 baseline。"""
+    for name in module_names or []:
         try:
             module = importlib.import_module(name)
         except ImportError as error:
-            print(f"[略過] 無法載入 {name}：{error}")
-            continue
-        for method, fn in getattr(module, "METHODS", {}).items():
+            sys.exit(f"[錯誤] 無法載入 --plugins 指定的模組 {name}：{error}\n"
+                     "模組名稱是檔名 (不含 .py)，且要在 SourceCode/ 下或在 PYTHONPATH 裡。")
+        methods = dict(getattr(module, "METHODS", {}))
+        if not methods and hasattr(module, "semantic_search"):
+            methods = {"semantic": lambda q, k, _fn=module.semantic_search: _fn(q, k)}
+        if not methods:
+            sys.exit(f"[錯誤] 模組 {name} 沒有 METHODS ({{名稱: fn(query, k)}})，沒有任何方法可評估。\n"
+                     "請該模組的負責人加上 METHODS，格式見 Methods.py 開頭的說明。")
+        for method, fn in methods.items():
             register(method, fn)
             print(f"[載入] {name} -> {method}")

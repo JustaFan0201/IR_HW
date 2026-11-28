@@ -14,6 +14,8 @@
     - nDCG@k   = DCG / IDCG，gain = 2^rel - 1，折扣 = log2(位置 + 1)；IDCG 由 qrels 的最佳排法算出。
     - Unjudged@k = 前 k 名中沒有標註過的比例，用來檢查結果可不可信 (越高代表標註越沒涵蓋這個方案)。
     - 沒有任何相關文件 (R = 0) 的查詢不納入平均 (沒有東西可找)。
+    - 有相關文件、但 run 裡沒有這個查詢 (方法沒回傳結果) 的查詢，當成空排序，各指標為 0，
+      仍然算進平均的分母；否則對困難查詢沒有結果的方法反而會得到較高的平均。
 
 qrels 檔格式是 TREC 標準：每行 `qid 0 docID rel`。
 """
@@ -102,12 +104,13 @@ def unjudged_at_k(ranked, judgments, k=10):
 # ---------------------------------------------------------------- 整組查詢
 
 def evaluate_per_query(run, qrels, k=10):
-    """回傳 {qid: {"P@k", "AP", "nDCG@k", "Unjudged@k"}}，只含 qrels 中有相關文件的查詢。"""
+    """回傳 {qid: {"P@k", "AP", "nDCG@k", "Unjudged@k"}}，只含 qrels 中有相關文件的查詢。
+    run 裡缺少的查詢當成空排序 (全部指標為 0)，不會被排除。"""
     per_query = {}
     for qid, judgments in qrels.items():
-        if qid not in run or not any(r >= 1 for r in judgments.values()):
+        if not any(r >= 1 for r in judgments.values()):
             continue
-        ranked = run[qid]
+        ranked = run.get(qid, [])
         per_query[qid] = {
             f"P@{k}": precision_at_k(ranked, judgments, k),
             "AP": average_precision(ranked, judgments),
@@ -129,7 +132,8 @@ def evaluate(run, qrels, k=10):
 
 def paired_randomization_test(scores_a, scores_b, trials=10000, seed=0):
     """配對隨機化檢定 (sign-flip)：兩方案逐查詢分數差的平均是否顯著不為 0。
-    scores_a / scores_b 是 {qid: 分數}；回傳雙尾 p 值。查詢只有 20～30 個，p 值只能當參考。"""
+    scores_a / scores_b 是 {qid: 分數}；回傳雙尾 p 值 (觀察到的那組也算一次，所以最小是 1/(trials+1)，不會是 0)。
+    查詢只有 20～30 個，p 值只能當參考。"""
     diffs = [scores_a[q] - scores_b[q] for q in scores_a if q in scores_b]
     if not diffs:
         return 1.0
@@ -139,7 +143,7 @@ def paired_randomization_test(scores_a, scores_b, trials=10000, seed=0):
         1 for _ in range(trials)
         if abs(sum(d if rng.random() < 0.5 else -d for d in diffs)) >= observed - 1e-12
     )
-    return extreme / trials
+    return (extreme + 1) / (trials + 1)
 
 
 if __name__ == "__main__":
@@ -154,4 +158,8 @@ if __name__ == "__main__":
     assert unjudged_at_k(run, j, 5) == 2 / 5
     res = evaluate({"q": run}, {"q": j}, k=5)
     assert abs(res["nDCG@5"] - dcg / idcg) < 1e-9
+    # run 缺少的查詢要算 0 分，不能被排除在平均之外
+    res = evaluate({"q1": run}, {"q1": j, "q2": {"z": 1}}, k=5)
+    assert abs(res["P@5"] - (3 / 5 + 0.0) / 2) < 1e-9
+    assert paired_randomization_test({"a": 1.0, "b": 1.0}, {"a": 0.0, "b": 0.0}, trials=99) > 0
     print("Evaluate.py 自我檢查通過")

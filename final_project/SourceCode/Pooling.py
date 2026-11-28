@@ -81,7 +81,7 @@ def cmd_annotate(args, queries):
     store = _doc_store()
     if store is None:
         return
-    todo = [(qid, q, t) for qid, q, t in queries if not args.queries or qid in args.queries]
+    todo = queries      # main() 已依 --queries 過濾
     total = sum(1 for qid, _, _ in todo for d in pool[qid] if d not in qrels.get(qid, {}))
     done = 0
     print(f"\n待標註 {total} 筆。輸入 2 / 1 / 0；s 跳過；q 離開 (進度已存檔)。標錯時直接在 qrels.txt 末尾補一行同 qid／docID 的新標註 (後面的覆蓋前面的)。\n")
@@ -128,21 +128,56 @@ def cmd_export(args, queries):
 
 
 def cmd_merge(args, queries):
+    if not args.files:
+        sys.exit("merge 需要指定要合併的 CSV：Pooling.py merge a.csv b.csv")
     existing = load_qrels(QRELS_PATH) if os.path.exists(QRELS_PATH) else {}
-    added = skipped = 0
+    valid_qids = {qid for qid, _, _ in queries}
+
+    # 先把所有檔案讀完、檢查完，才一次寫入 qrels；中途出錯時 qrels 不會留下半份資料
+    new_rows, blank, invalid, unknown_qid, duplicates, conflicts = {}, 0, 0, 0, 0, 0
     for path in args.files:
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                rel = row["rel"].strip()
-                if rel not in ("0", "1", "2"):
-                    skipped += 1
-                    continue
-                if row["docID"] in existing.get(row["qid"], {}):
-                    continue
-                append_qrel(QRELS_PATH, row["qid"], row["docID"], int(rel))
-                existing.setdefault(row["qid"], {})[row["docID"]] = int(rel)
-                added += 1
-    print(f"合併 {added} 筆；{skipped} 筆 rel 欄空白或格式不對，已略過。")
+        for row in _read_csv_rows(path):
+            qid = (row.get("qid") or "").strip()
+            doc_id = (row.get("docID") or "").strip()
+            rel = (row.get("rel") or "").strip()
+            if not qid or not doc_id:
+                continue
+            if rel == "":
+                blank += 1
+            elif rel not in ("0", "1", "2"):
+                invalid += 1
+            elif qid not in valid_qids:
+                unknown_qid += 1
+            elif doc_id in existing.get(qid, {}):
+                duplicates += 1
+            elif (qid, doc_id) in new_rows:
+                if new_rows[(qid, doc_id)] != int(rel):
+                    conflicts += 1      # 兩份檔案標得不一樣：以先讀到的為準
+                else:
+                    duplicates += 1
+            else:
+                new_rows[(qid, doc_id)] = int(rel)
+    for (qid, doc_id), rel in new_rows.items():
+        append_qrel(QRELS_PATH, qid, doc_id, rel)
+    print(f"合併 {len(new_rows)} 筆。略過：rel 空白 {blank}、rel 不是 0/1/2 {invalid}、"
+          f"qid 不在查詢集 {unknown_qid}、已有標註或重複 {duplicates}。")
+    if conflicts:
+        print(f"[注意] {conflicts} 筆在不同檔案中標得不一樣，已採用先合併的那份；請確認。")
+
+
+def _read_csv_rows(path):
+    """讀 CSV。依序試 UTF-8 (含 BOM) 與 cp950 (中文 Windows 的 Excel 另存「CSV (逗號分隔)」)。"""
+    for encoding in ("utf-8-sig", "cp950"):
+        try:
+            with open(path, newline="", encoding=encoding) as f:
+                reader = csv.DictReader(f)
+                missing = {"qid", "docID", "rel"} - set(reader.fieldnames or [])
+                if missing:
+                    sys.exit(f"{path} 缺少欄位 {sorted(missing)}；請保留匯出時的標題列。")
+                return list(reader)
+        except UnicodeDecodeError:
+            continue
+    sys.exit(f"無法解讀 {path} 的編碼；請在 Excel 另存成「CSV UTF-8 (逗號分隔)」。")
 
 
 def cmd_status(args, queries):
@@ -167,6 +202,11 @@ def main():
     args = parser.parse_args()
 
     queries = load_queries(QUERIES_PATH)
+    if args.queries:                # 所有子指令 (annotate / export / status) 都只處理指定的 qid
+        unknown_ids = [q for q in args.queries if q not in {qid for qid, _, _ in queries}]
+        if unknown_ids:
+            sys.exit(f"--queries 中有不存在的 qid：{unknown_ids}")
+        queries = [item for item in queries if item[0] in args.queries]
     if args.command in ("merge", "status"):
         return {"merge": cmd_merge, "status": cmd_status}[args.command](args, queries)
 

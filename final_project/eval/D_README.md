@@ -14,7 +14,7 @@ python SourceCode/Pooling.py annotate --methods tfidf bm25 --depth 20        # �
 python SourceCode/Pooling.py status
 python SourceCode/RunExperiments.py                                           # baseline
 python SourceCode/RunExperiments.py --sweep-mu 100 500 1000 2000 5000
-python SourceCode/RunExperiments.py --plugins SemanticSearch Feedback         # A、C 完成後
+python SourceCode/RunExperiments.py --plugins semantic feedback               # A、C 完成後 (模組檔名，不含 .py)
 ```
 新方法加入後先用 `Pooling.py annotate --methods ... --plugins ...` 補標（只會問沒標過的），再重跑實驗。
 
@@ -23,6 +23,9 @@ python SourceCode/RunExperiments.py --plugins SemanticSearch Feedback         # 
 qrels 為 TREC 格式 `qid 0 docID rel`；標錯時在檔尾補同 qid／docID 的新行即可（後面的覆蓋前面的）。
 
 ## 方法定義重點
-- 未標註文件視為不相關；R=0 的查詢不納入平均；MAP 看前 100 名；nDCG gain = 2^rel − 1
+- 未標註文件視為不相關；R=0 的查詢不納入平均；方法沒有回傳結果的查詢算 0 分（仍在分母內）；MAP 看前 100 名；nDCG gain = 2^rel − 1
+- `--plugins` 載入失敗、模組沒有 `METHODS`、`--methods`／`--baseline` 打錯，都會直接報錯結束；`--baseline` 預設是 bm25（在比較名單中才做檢定）
+- 顯著性 p 值為 (極端次數+1)/(次數+1)，最小約 0.0001；mu 必須大於 0
+- `Pooling.py` 的 `--queries` 對 annotate／export／status 都有效；merge 會先檢查完所有 CSV 再一次寫入，支援 Excel 另存的 cp950 檔
 - LM 計分用與原式排名等價的形式，分數是相對值，不能和其他方案的分數直接比
 - 調參與報告用同一份 qrels 會偏樂觀，報告中請說明

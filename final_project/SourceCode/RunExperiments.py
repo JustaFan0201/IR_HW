@@ -1,7 +1,7 @@
 """比較各排序方案：P@10、MAP、nDCG@10。模組 D。
 
     python SourceCode/RunExperiments.py                                  # baseline：tfidf、tfidf-raw、bm25、lm
-    python SourceCode/RunExperiments.py --plugins SemanticSearch Feedback  # 加入 A、C 的方法
+    python SourceCode/RunExperiments.py --plugins semantic feedback  # 加入 A、C 的方法 (模組檔名，不含 .py)
     python SourceCode/RunExperiments.py --methods bm25 lm --baseline bm25
     python SourceCode/RunExperiments.py --sweep-mu 100 500 1000 2000 5000 # 語言模型的 mu 掃描
 
@@ -27,6 +27,7 @@ import Search as S
 from config import BASE_DIR
 from Evaluate import (evaluate, evaluate_per_query, load_qrels, load_queries,
                       paired_randomization_test, write_run)
+from LMSearch import positive_float
 
 EVAL_DIR = os.path.join(BASE_DIR, "eval")
 RESULT_DIR = os.path.join(EVAL_DIR, "results")
@@ -77,19 +78,21 @@ def main():
     parser = argparse.ArgumentParser(description="排序方案比較實驗")
     parser.add_argument("--methods", nargs="+", default=["tfidf", "tfidf-raw", "bm25", "lm"])
     parser.add_argument("--plugins", nargs="*", default=[], help="載入其他組員的方法模組")
-    parser.add_argument("--baseline", default="bm25", help="顯著性檢定的對照方案")
-    parser.add_argument("--sweep-mu", type=float, nargs="+", help="只做語言模型 mu 的掃描")
+    parser.add_argument("--baseline", default=None,
+                        help="顯著性檢定的對照方案 (預設：bm25 在比較名單中就用它，否則不做檢定)")
+    parser.add_argument("--sweep-mu", type=positive_float, nargs="+", help="只做語言模型 mu 的掃描 (mu 須大於 0)")
     parser.add_argument("--qrels", default=os.path.join(EVAL_DIR, "qrels.txt"))
     parser.add_argument("--queries", default=os.path.join(EVAL_DIR, "eval_queries.txt"))
     args = parser.parse_args()
 
     queries = load_queries(args.queries)
-    qrels = load_qrels(args.qrels)
+    qrels = load_qrels(args.qrels) if os.path.exists(args.qrels) else {}
     types = {qid: qtype for qid, _, qtype in queries}
     judged = [qid for qid, _, _ in queries if any(r >= 1 for r in qrels.get(qid, {}).values())]
     print(f"{len(queries)} 個查詢，其中 {len(judged)} 個有相關文件標註 (只有這些會納入平均)")
     if not judged:
-        raise SystemExit("還沒有標註資料：先用 Pooling.py 標註 (見 Pooling.py 開頭的說明)。")
+        raise SystemExit(f"還沒有標註資料 (找不到或沒有相關文件：{args.qrels})。"
+                         "先用 Pooling.py 標註 (見 Pooling.py 開頭的說明)。")
 
     S.load_index()
 
@@ -104,8 +107,15 @@ def main():
         return
 
     Methods.load_plugins(args.plugins)
-    names = [m for m in args.methods + [p for p in Methods.METHODS if p not in args.methods and p not in
-             ("tfidf", "tfidf-raw", "bm25", "lm")] if m in Methods.METHODS]
+    unknown = [m for m in args.methods if m not in Methods.METHODS]
+    if unknown:
+        raise SystemExit(f"未知的方法：{unknown}；可用：{sorted(Methods.METHODS)}"
+                         "\n(plugin 的方法要加 --plugins 模組名 才會出現)")
+    builtin = ("tfidf", "tfidf-raw", "bm25", "lm")
+    names = args.methods + [p for p in Methods.METHODS if p not in args.methods and p not in builtin]
+    baseline = args.baseline or ("bm25" if "bm25" in names else None)
+    if args.baseline and args.baseline not in names:
+        raise SystemExit(f"--baseline {args.baseline} 不在比較的方法中：{names}")
 
     os.makedirs(os.path.join(RESULT_DIR, "runs"), exist_ok=True)
     runs, summary, per_query = {}, {}, {}
@@ -154,18 +164,18 @@ def main():
                                 f"{m['nDCG@10']:.4f}", f"{m['Unjudged@10']:.2f}"])
 
     # ---- 顯著性 (nDCG@10，對 baseline)
-    if args.baseline in per_query:
-        print(f"\n對 {args.baseline} 的 nDCG@10 差異 (配對隨機化檢定；只有 {len(judged)} 個查詢，p 值僅供參考)：")
-        base = {q: m["nDCG@10"] for q, m in per_query[args.baseline].items()}
+    if baseline:
+        print(f"\n對 {baseline} 的 nDCG@10 差異 (配對隨機化檢定；只有 {len(judged)} 個查詢，p 值僅供參考)：")
+        base = {q: m["nDCG@10"] for q, m in per_query[baseline].items()}
         rows = []
         for n in names:
-            if n == args.baseline:
+            if n == baseline:
                 continue
             other = {q: m["nDCG@10"] for q, m in per_query[n].items()}
             diff = sum(other[q] - base[q] for q in base) / len(base)
             wins = sum(1 for q in base if other[q] > base[q] + 1e-9)
             losses = sum(1 for q in base if other[q] < base[q] - 1e-9)
-            rows.append([n, f"{diff:+.4f}", f"{wins} / {losses}", f"{paired_randomization_test(other, base):.3f}"])
+            rows.append([n, f"{diff:+.4f}", f"{wins} / {losses}", f"{paired_randomization_test(other, base):.4f}"])
         print(markdown_table(rows, ["方法", "平均差", "贏 / 輸 (查詢數)", "p"]))
 
     # ---- 標註涵蓋度警告
