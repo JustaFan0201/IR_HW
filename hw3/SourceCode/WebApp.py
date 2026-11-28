@@ -32,8 +32,9 @@ EXAMPLES = ['airplanes', 'United States government', 'hong AND NOT kong', '"hong
 # ---------------------------------------------------------------- 文件內容 (WARC)
 
 class _TextExtractor(HTMLParser):
-    """把 HTML 轉成純文字；script / style / meta / noscript 不算內文，與 HW1 的處理一致。"""
-    SKIP = {"script", "style", "meta", "noscript"}
+    """把 HTML 轉成純文字；script / style / noscript 不算內文，與 HW1 的處理一致。
+    meta 不放進 SKIP：<meta> 沒有結束標籤，放進去會讓 _skip 一直 >0，之後的文字全被丟掉。"""
+    SKIP = {"script", "style", "noscript"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
