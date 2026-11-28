@@ -6,7 +6,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 # 往上一層推，得到專案根目錄 (hw3)
 BASE_DIR = os.path.dirname(CURRENT_DIR)
 
-# 設定你的倒排索引檔名稱 (需確保該檔案已放在 hw3 根目錄下)
+# 倒排索引檔名稱：由 EmbedTokens.py 從 hw1/HW1.txt 嵌入組員學號後產生於 hw3 根目錄
 INDEX_FILE_NAME = "HW1.txt"
 
 # 組合出完整的索引檔絕對路徑 (hw3/HW1.txt)
@@ -22,8 +22,9 @@ TOP_K = 10
 OUTPUT_FILE_NAME = "HW3.txt"
 OUTPUT_FILE_PATH = os.path.join(BASE_DIR, OUTPUT_FILE_NAME)
 
-# 網頁介面 (WebApp.py) 顯示摘要與全文用的 HW1 WARC 檔；找不到時網頁仍可搜尋，只是沒有摘要
-WARC_FILE_PATH = os.path.join(os.path.dirname(BASE_DIR), "hw1", "02.warc")
+# RAG 取文件內文用的 WARC 檔：由 EmbedTokens.py 從 hw1/02.warc 嵌入組員學號後產生 (hw3/02_hw3.warc)
+# 找不到時仍可搜尋，只是沒有內文
+WARC_FILE_PATH = os.path.join(BASE_DIR, "02_hw3.warc")
 
 # 預設權重/排序方案 (可用命令列 --weighting 覆蓋)：
 #   tfidf     : 作業指定公式 (1 + log tf) * log(N/df)，cosine similarity

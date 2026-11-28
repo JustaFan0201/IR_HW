@@ -1,0 +1,9 @@
+{
+  "template": "IR HW3 special token: student ID {student_id}.",
+  "docs": [
+    {"student_id": "112590007", "doc_id": "clueweb09-en0000-02-01999"},
+    {"student_id": "112590030", "doc_id": "clueweb09-en0000-02-11022"},
+    {"student_id": "112590013", "doc_id": "clueweb09-en0000-02-21424"},
+    {"student_id": "112590019", "doc_id": "clueweb09-en0000-02-29045"}
+  ]
+}

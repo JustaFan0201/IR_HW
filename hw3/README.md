@@ -9,9 +9,34 @@
   ollama run llama3.2
   ```
 - **Python 套件**：`pip install -r requirements.txt` (包含 `ollama` 與 `nltk`)。
-- **索引檔與 WARC 檔**：
-  - 倒排索引檔 `HW1.txt` 放置於 `hw3/` 根目錄 (可在 `config.py` 的 `INDEX_FILE_NAME` 修改)。
-  - WARC 原始文檔 `02.warc` 預設路徑位於 `../hw1/02.warc` (可在 `config.py` 的 `WARC_FILE_PATH` 修改)。
+- **索引檔與 WARC 檔**：先準備好 `hw1/02.warc` 與 `hw1/HW1.txt`，再執行下面的「嵌入學號」產生 HW3 用的檔案。
+
+### 嵌入學號 (特殊 token)
+
+作業要求在文件集裡嵌入特殊 token。組員學號與要嵌入的文件寫在 `embed_tokens.json` (進 git)，由腳本產生 HW3 用的 WARC 與索引：
+
+```bash
+python SourceCode/EmbedTokens.py
+```
+
+- 輸入 (不修改)：`hw1/02.warc`、`hw1/HW1.txt`
+- 輸出：`hw3/02_hw3.warc`、`hw3/HW1.txt` (被 `.gitignore`，每個人自己產生，約 20 秒)
+- 每篇在 HTML 最前面插入一句 `IR HW3 special token: student ID <學號>.`；索引直接修補 (該篇原有詞的位置 +7，再加上這句的詞)，不需要重跑 Solr
+- 同一份設定 + 同一支程式 → 輸出完全相同。跑完請比對 sha256：
+
+| 檔案 | sha256 |
+|---|---|
+| `02_hw3.warc` | `e4a0b5831b2c58d233aae7cfb7beb8128e053db1cb6399aad99fe5c96ce829a5` |
+| `HW1.txt` | `c37b71f5753152ce02a27fe1c6233cea43bd7cd569221f401157697491aec77d` |
+
+| 學號 | 嵌入的文件 |
+|---|---|
+| 112590007 | `clueweb09-en0000-02-01999` |
+| 112590030 | `clueweb09-en0000-02-11022` |
+| 112590013 | `clueweb09-en0000-02-21424` |
+| 112590019 | `clueweb09-en0000-02-29045` |
+
+要換文件或改句子：改 `embed_tokens.json` 後重跑，並更新上表的 sha256。`python SourceCode/EmbedTokens.py --check` 可只檢查設定不寫檔 (文件不在索引裡、或抽出的文字不是以嵌入句開頭時會報錯)。
 
 ## 2. 設定 (`SourceCode/config.py`)
 
@@ -21,7 +46,7 @@
 | `TOTAL_DOCS` | 文件總數 N (IDF 用)，須與 HW1 索引的文件數一致 | `35011` |
 | `TOP_K` | Retriever 預設檢索的前 N 名文件筆數 | `10` |
 | `DEFAULT_WEIGHTING` | 預設權重方案 (`tfidf` / `bm25`) | `tfidf` |
-| `WARC_FILE_PATH` | HW1 WARC 原始文檔絕對/相對路徑 (提供 RAG 內文) | `../hw1/02.warc` |
+| `WARC_FILE_PATH` | 嵌入學號後的 WARC (提供 RAG 內文) | `02_hw3.warc` |
 | `OUTPUT_FILE_NAME` | 批次模式的輸出檔名 | `HW3.txt` |
 
 ## 3. 執行
@@ -46,10 +71,10 @@ python SourceCode/RagLLM.py
 from RagLLM import generate_rag_response
 
 # 呼叫無 RAG 模型回答
-ans_no_rag = generate_rag_response("114598xxx", use_rag=False)
+ans_no_rag = generate_rag_response("112590013", use_rag=False)
 
 # 呼叫有 RAG 模型回答 (搭配 llama3.2)
-ans_rag = generate_rag_response("114598xxx", use_rag=True, model_name="llama3.2")
+ans_rag = generate_rag_response("112590013", use_rag=True, model_name="llama3.2")
 ```
 
 ## 4. 系統架構與模組設計
@@ -86,7 +111,7 @@ ans_rag = generate_rag_response("114598xxx", use_rag=True, model_name="llama3.2"
 
 | 測試類型 | 範例 Prompt | 無 RAG 回應表現 (No RAG) | 有 RAG 回應表現 (With RAG) |
 |---|---|---|---|
-| **特殊 Token / 學號** | `114598xxx` | 模型無法得知該 Token，產生幻覺或回答未知。 | **精確引述**：列出該學號出現的文件 ID (`clueweb09-...`)，並依據上下文正確回答。 |
+| **特殊 Token / 學號** | `112590013` | 模型無法得知該 Token，產生幻覺或回答未知。 | **精確引述**：列出該學號出現的文件 ID (`clueweb09-...`)，並依據上下文正確回答。 |
 | **事實與新聞主題** | `United States government` | 僅依據模型預訓練知識回答泛泛內容。 | **特定引述**：提取 ClueWeb09 資料集中相關新聞與網頁內文，並引述文件來源。 |
 
 ### Context 視窗控制機制
