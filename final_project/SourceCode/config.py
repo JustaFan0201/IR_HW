@@ -46,3 +46,10 @@ ROCCHIO_GAMMA = 0.15 # 不相關文件向量權重
 
 # 盲目相關回饋 (PRF) 擴展詞數量
 EXPAND_TERMS_M = 5
+
+# semantic.py 設定參數 (模組 C：語意檢索)
+SEMANTIC_MODEL = "all-MiniLM-L6-v2"
+SEMANTIC_BODY_WORDS = 200  # 每篇取標題 + 內文前幾個字編碼
+SEMANTIC_BATCH_SIZE = 64
+SEMANTIC_VECTORS_PATH = os.path.join(BASE_DIR, "semantic_vectors.npy")   # 文件向量 (已正規化)，不進 git
+SEMANTIC_IDS_PATH = os.path.join(BASE_DIR, "semantic_doc_ids.txt")       # 向量列順序對應的 doc ID，不進 git

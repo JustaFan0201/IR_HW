@@ -10,125 +10,24 @@
 """
 import argparse
 import html
-import os
 import re
 import threading
 import time
-from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import Search
+import feedback
+from docs import DocStore
 from analyzer import analyze, token_spans
-from config import BASE_DIR, DEFAULT_WEIGHTING, TOP_K, WARC_FILE_PATH
+from config import (BASE_DIR, DEFAULT_WEIGHTING, ROCCHIO_ALPHA, ROCCHIO_BETA, ROCCHIO_GAMMA, TOP_K,
+                    WARC_FILE_PATH)
 
 SNIPPET_CHARS = 300
 FULL_TEXT_CHARS = 100_000
 TOP_CHOICES = (10, 20, 50, 100)
 EXAMPLES = ['airplanes', 'United States government', 'hong AND NOT kong', '"hong kong"~5',
             'govern*', 'goverment', 'mikrosoft']
-
-
-# ---------------------------------------------------------------- 文件內容 (WARC)
-
-class _TextExtractor(HTMLParser):
-    """把 HTML 轉成純文字；script / style / meta / noscript 不算內文，與 HW1 的處理一致。"""
-    SKIP = {"script", "style", "meta", "noscript"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts, self.title, self._skip, self._in_title = [], "", 0, False
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self._skip += 1
-        elif tag == "title":
-            self._in_title = True
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP and self._skip:
-            self._skip -= 1
-        elif tag == "title":
-            self._in_title = False
-
-    def handle_data(self, data):
-        if self._skip:
-            return
-        data = data.strip()
-        if not data:
-            return
-        if self._in_title and not self.title:
-            self.title = data
-        self.parts.append(data)
-
-
-def html_to_text(block):
-    """去掉 HTTP 標頭後轉文字，回傳 (標題, 內文)。"""
-    _, sep, body = block.partition(b"\r\n\r\n")
-    if not sep:
-        _, sep, body = block.partition(b"\n\n")
-        if not sep:
-            body = block
-    parser = _TextExtractor()
-    try:
-        parser.feed(body.decode("utf-8", "replace"))
-    except Exception:
-        pass
-    return parser.title, " ".join(parser.parts)
-
-
-class DocStore:
-    """掃一次 WARC 記下每篇文件的位置 (只 seek 不讀內容)，之後依 docID 取出文字。"""
-
-    def __init__(self, path):
-        self.path = path
-        self.offsets = {}  # docID -> (內容起點, 長度)
-        self.ready = False
-        self.available = os.path.exists(path)
-        self._cache = {}
-        self._lock = threading.Lock()
-
-    def scan(self):
-        if not self.available:
-            return
-        with open(self.path, "rb") as f:
-            while True:
-                line = f.readline()
-                if not line:
-                    break
-                if not line.startswith(b"WARC/"):
-                    continue
-                header = {}
-                while True:
-                    h = f.readline()
-                    if h in (b"\r\n", b"\n", b""):
-                        break
-                    key, _, value = h.partition(b":")
-                    header[key.strip().decode("ascii", "ignore")] = value.strip().decode("utf-8", "ignore")
-                length = int(header.get("Content-Length", 0))
-                if header.get("WARC-Type") == "response":
-                    doc_id = header.get("WARC-TREC-ID") or header.get("WARC-Record-ID")
-                    self.offsets[doc_id] = (f.tell(), length)
-                f.seek(length, os.SEEK_CUR)
-        self.ready = True
-
-    def get(self, doc_id):
-        """回傳 (標題, 內文)；取不到回傳 None。"""
-        with self._lock:
-            if doc_id in self._cache:
-                return self._cache[doc_id]
-        location = self.offsets.get(doc_id)
-        if location is None:
-            return None
-        with open(self.path, "rb") as f:
-            f.seek(location[0])
-            block = f.read(location[1])
-        result = html_to_text(block)
-        with self._lock:
-            if len(self._cache) > 200:
-                self._cache.clear()
-            self._cache[doc_id] = result
-        return result
 
 
 # ---------------------------------------------------------------- 標示查詢詞
@@ -172,6 +71,34 @@ def make_snippet(text, terms):
     return ("… " if start else "") + highlight(piece, terms) + (" …" if start + len(piece) < len(text) else "")
 
 
+# ---------------------------------------------------------------- 相關回饋 (模組 A 的 rocchio)
+
+FEEDBACK_SHOWN_TERMS = 10  # 結果頁顯示 Rocchio 加入的前幾個詞
+
+
+def scoring_terms(q, suggestions, apply_suggestions):
+    """與 Search.search 相同的計分詞與布林運算式 (含拼字建議替換)，回傳 (terms, expression)。"""
+    expression = Search.parse_boolean_query(q)
+    if expression is not None:
+        if apply_suggestions and suggestions:
+            expression = Search.replace_boolean_terms(expression, suggestions)
+        return Search.get_boolean_terms(expression), expression
+    terms = analyze(q)
+    if apply_suggestions:
+        terms = [suggestions[t][0] if t in suggestions else t for t in terms]
+    return terms, None
+
+
+def rocchio_rerank(q, suggestions, apply_suggestions, rel_ids, nonrel_ids):
+    """以 Rocchio 修正查詢向量後用 tfidf cosine 重查；布林查詢仍限制在符合運算式的文件內。
+    回傳 (results, 新加入的詞 [(詞, 權重)])。"""
+    terms, expression = scoring_terms(q, suggestions, apply_suggestions)
+    new_vec = feedback.rocchio(Search.query_vector(terms), rel_ids, nonrel_ids)
+    allowed = Search.evaluate_boolean_query(expression) if expression is not None else None
+    added = sorted(((t, w) for t, w in new_vec.items() if t not in set(terms)), key=lambda x: x[1], reverse=True)
+    return Search.rank_by_vector(new_vec, allowed), added[:FEEDBACK_SHOWN_TERMS]
+
+
 # ---------------------------------------------------------------- 頁面
 
 CSS = """
@@ -194,7 +121,14 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 .snippet{margin-top:4px;word-break:break-word}mark{background:var(--mark);color:inherit;padding:0 2px;border-radius:3px}
 .fulltext{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;white-space:pre-wrap;word-break:break-word}
 .empty{color:var(--muted);padding:20px 0}
+.votes{margin-left:12px}.votes label{margin-right:8px;cursor:pointer;font-family:system-ui,sans-serif;font-size:14px}
+.votes input{vertical-align:middle;margin:0 3px 0 0}.fbbar{margin:10px 0}
 """
+
+# 同一篇的 👍 和 👎 互斥：勾一個就取消另一個
+VOTE_SCRIPT = """<script>document.querySelectorAll('.votes input').forEach(function(box){
+box.addEventListener('change',function(){if(!box.checked)return;
+box.closest('.votes').querySelectorAll('input').forEach(function(o){if(o!==box)o.checked=false;});});});</script>"""
 
 
 def page(title, body):
@@ -233,23 +167,37 @@ class App:
         except ValueError:
             top = self.top
         apply_suggestions = params.get("apply", ["0"])[0] == "1"
+        rel_ids, nonrel_ids = params.get("rel", []), params.get("nonrel", [])
+        both = set(rel_ids) & set(nonrel_ids)  # 同時勾 👍 和 👎 視為沒標
+        # 不在索引裡的 ID 丟掉：rocchio 會跳過它們，但仍會算進 β/γ 的分母，篇數顯示也會不對
+        rel_ids = list(dict.fromkeys(d for d in rel_ids if d not in both and d in Search.doc_lengths))
+        nonrel_ids = list(dict.fromkeys(d for d in nonrel_ids if d not in both and d in Search.doc_lengths))
 
         body = [self.search_form(q, weighting, top)]
         if q:
-            body.append(self.results(q, weighting, top, apply_suggestions))
+            body.append(self.results(q, weighting, top, apply_suggestions, rel_ids, nonrel_ids))
         return page("IR HW2 搜尋" if not q else f"{q} - IR HW2 搜尋", "".join(body))
 
-    def results(self, q, weighting, top, apply_suggestions):
+    def results(self, q, weighting, top, apply_suggestions, rel_ids=(), nonrel_ids=()):
         started = time.perf_counter()
         try:
             results, suggestions, notes = Search.search(
                 q, interactive=False, weighting=weighting, use_champion=self.champion is not None,
                 top_k=top, apply_suggestions=apply_suggestions)
+            use_feedback = bool(rel_ids or nonrel_ids)
+            if use_feedback:
+                results, added = rocchio_rerank(q, suggestions, apply_suggestions, rel_ids, nonrel_ids)
         except ValueError as error:
             return f"<div class='notice'>查詢錯誤：{html.escape(str(error))}</div>"
         elapsed = (time.perf_counter() - started) * 1000
 
         parts = []
+        if use_feedback:
+            added_text = "、".join(html.escape(t) for t, _ in added) or "(無)"
+            clear = search_url(q, weighting, top, apply_suggestions)
+            parts.append(f"<div class='notice'>相關回饋 (Rocchio α={ROCCHIO_ALPHA}, β={ROCCHIO_BETA}, γ={ROCCHIO_GAMMA})："
+                         f"👍 {len(rel_ids)} 篇、👎 {len(nonrel_ids)} 篇，以 tfidf cosine 重新排序。"
+                         f"加入權重最高的詞：{added_text} — <a href='{html.escape(clear)}'>清除回饋</a></div>")
         for note in notes:
             parts.append(f"<div class='notice'>萬用字元：{html.escape(note)}</div>")
         if suggestions:
@@ -257,27 +205,49 @@ class App:
             if apply_suggestions:
                 parts.append(f"<div class='notice'>已套用拼字建議：{lines}</div>")
             else:
-                link = f"/?q={requests_quote(q)}&weighting={weighting}&top={top}&apply=1"
+                link = search_url(q, weighting, top, True, rel_ids, nonrel_ids)
                 parts.append(f"<div class='notice'>拼字建議：{lines} — <a href='{html.escape(link)}'>改用第一個建議搜尋</a></div>")
 
-        mode = "，champion list 近似計分" if self.champion is not None else ""
+        if use_feedback:
+            mode = "tfidf cosine + Rocchio 回饋"
+        else:
+            mode = weighting + ("，champion list 近似計分" if self.champion is not None else "")
         parts.append(f"<div class='meta'>命中 {len(results):,} 篇，顯示前 {min(top, len(results))} 名 · "
-                     f"{weighting}{mode} · {elapsed:.0f} ms</div>")
+                     f"{mode} · {elapsed:.0f} ms</div>")
         if not results:
             parts.append("<div class='empty'>找不到符合的搜尋結果。</div>")
             return "".join(parts)
 
+        # 結果列表包在回饋表單裡：勾 👍／👎 後按按鈕，標記以 rel / nonrel 參數帶到網址，可多輪累積
+        hidden = "".join(f"<input type='hidden' name='{k}' value='{html.escape(str(v), quote=True)}'>"
+                         for k, v in (("q", q), ("weighting", weighting), ("top", top)))
+        hidden += "<input type='hidden' name='apply' value='1'>" if apply_suggestions else ""
+        # 已標記但不在這頁的文件 (被 Rocchio 擠出前 top 名) 沒有勾選框，用 hidden 帶著，下一輪才不會遺失
+        shown = {doc_id for doc_id, _ in results[:top]}
+        kept = [(k, d) for k, ids in (("rel", rel_ids), ("nonrel", nonrel_ids)) for d in ids if d not in shown]
+        hidden += "".join(f"<input type='hidden' name='{k}' value='{html.escape(d, quote=True)}'>" for k, d in kept)
+        kept_note = f" · 另有 {len(kept)} 篇已標記的文件不在這頁，標記會保留" if kept else ""
+        submit = ("<div class='fbbar'><button type='submit'>依回饋重新搜尋</button> "
+                  f"<span class='meta'>勾選 👍 相關／👎 不相關的結果{kept_note}</span></div>")
+        parts.append(f"<form class='feedback' action='/' method='get'>{hidden}{submit}")
+        rel_set, nonrel_set = set(rel_ids), set(nonrel_ids)
         terms = query_terms_for_highlight(q, suggestions)
+        state = search_url(q, weighting, top, apply_suggestions, rel_ids, nonrel_ids)[2:]  # 去掉開頭的 "/?"
         for rank, (doc_id, score) in enumerate(results[:top], 1):
             doc = self.store.get(doc_id) if self.store.ready else None
             title = (doc[0] if doc and doc[0] else doc_id)
             snippet = make_snippet(doc[1], terms) if doc else ""
-            link = f"/doc?id={requests_quote(doc_id)}&q={requests_quote(q)}" + ("&apply=1" if apply_suggestions else "")
+            link = f"/doc?id={requests_quote(doc_id)}&{state}"
+            value = html.escape(doc_id, quote=True)
+            votes = (f"<span class='votes'>"
+                     f"<label title='相關'><input type='checkbox' name='rel' value='{value}'{' checked' if doc_id in rel_set else ''}>👍</label>"
+                     f"<label title='不相關'><input type='checkbox' name='nonrel' value='{value}'{' checked' if doc_id in nonrel_set else ''}>👎</label></span>")
             parts.append(
                 f"<div class='result'><span class='score'>{score:.6f}</span>"
                 f"<div class='title'>{rank}. <a href='{html.escape(link)}'>{highlight(title[:120], terms)}</a></div>"
-                f"<div class='id'>{html.escape(doc_id)}</div>"
+                f"<div class='id'>{html.escape(doc_id)}{votes}</div>"
                 + (f"<div class='snippet'>{snippet}</div>" if snippet else "") + "</div>")
+        parts.append(f"{submit}</form>{VOTE_SCRIPT}")
         if not self.store.ready:
             parts.append("<div class='meta'>(" + ("摘要尚未準備好：正在掃描 WARC 檔，稍後重新整理即可。" if self.store.available
                                                     else "找不到 WARC 檔，因此不顯示摘要。") + ")</div>")
@@ -287,7 +257,8 @@ class App:
         doc_id = params.get("id", [""])[0]
         q = params.get("q", [""])[0]
         doc = self.store.get(doc_id) if self.store.ready else None
-        back = f"/?q={requests_quote(q)}"
+        # 回搜尋結果時帶回原本的權重方案、top、拼字建議與回饋標記 (除了 id 以外的參數原樣帶回)
+        back = "/?" + urlencode([(k, v) for k, values in params.items() if k != "id" for v in values], quote_via=quote)
         if doc is None:
             return page("找不到文件", f"<p><a href='{html.escape(back)}'>← 回搜尋結果</a></p><div class='empty'>找不到文件 {html.escape(doc_id)} 的內容。</div>")
         suggestions = {}
@@ -305,8 +276,16 @@ class App:
 
 
 def requests_quote(value):
-    from urllib.parse import quote
     return quote(value, safe="")
+
+
+def search_url(q, weighting, top, apply_suggestions=False, rel_ids=(), nonrel_ids=()):
+    """搜尋結果頁的網址，帶上全部狀態 (權重方案、top、拼字建議、回饋標記)。"""
+    pairs = [("q", q), ("weighting", weighting), ("top", top)]
+    if apply_suggestions:
+        pairs.append(("apply", "1"))
+    pairs += [("rel", d) for d in rel_ids] + [("nonrel", d) for d in nonrel_ids]
+    return "/?" + urlencode(pairs, quote_via=quote)
 
 
 def make_handler(app):
