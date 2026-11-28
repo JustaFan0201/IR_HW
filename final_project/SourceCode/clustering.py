@@ -1,4 +1,4 @@
-"""模組 B：搜尋結果分群與視覺化 (課本 Ch.15)，介面見 INTERFACE.md。
+"""模組 B：搜尋結果分群與視覺化 (課本 Ch.15)。
 
     python SourceCode/clustering.py [--top 100] [--method kmeans|hier] [--k N] [--weighting tfidf]
 
@@ -20,10 +20,11 @@
 doc_ids 要依排名由高到低給。兩者共用同一份快取的分群結果，所以群編號與座標一定對得上。
 cluster() 的每個 dict 另外有 "terms" (標籤的詞幹串列) 與 "size"，用不到可以忽略。
 
-網頁前端 (給 C 接進 WebApp.py)：render_sidebar()、render_scatter()、CLUSTER_CSS 等，見檔案最下方
-與 clustering_integration.md。這個檔案本身不碰 WebApp.py。
+網頁前端 (給 C 接進 WebApp.py)：render_sidebar()、render_scatter()、CLUSTER_CSS 等，見檔案最下方。
+這個檔案本身不碰 WebApp.py。
 """
 import argparse
+import functools
 import html
 import math
 import re
@@ -37,10 +38,16 @@ from scipy import sparse
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 
-from config import (CLUSTER_TOP_N, CLUSTER_METHOD, CLUSTER_K_MIN, CLUSTER_K_MAX,
-                    CLUSTER_LABEL_TERMS, CLUSTER_MIN_SILHOUETTE, CLUSTER_MIN_SIZE, CLUSTER_CONTEXT_WINDOW)
 import Search
 from analyzer import STOPWORDS, _TOKEN_RE, _stem, token_spans
+# 分群參數都在 config.py (模組 B 區段)：
+#   CLUSTER_TOP_N 對前 N 篇分群；CLUSTER_METHOD kmeans / hier；CLUSTER_K_MIN、CLUSTER_K_MAX 自動選群數的範圍；
+#   CLUSTER_LABEL_TERMS 群標籤的詞數；
+#   CLUSTER_MIN_SILHOUETTE 自動選 k 時，最好的 silhouette 低於這個值就視為「沒有明顯的主題分群」，不硬切 (手動指定 k 時不套用)；
+#   CLUSTER_MIN_SIZE 自動選 k 時，每群至少要有的篇數 max(CLUSTER_MIN_SIZE, 前 N 篇的 5%)；
+#   CLUSTER_CONTEXT_WINDOW 「查詢詞前後文」分群時，查詢詞前後各取幾個詞 (含停用詞的位置)
+from config import (CLUSTER_CONTEXT_WINDOW, CLUSTER_K_MAX, CLUSTER_K_MIN, CLUSTER_LABEL_TERMS,
+                    CLUSTER_METHOD, CLUSTER_MIN_SILHOUETTE, CLUSTER_MIN_SIZE, CLUSTER_TOP_N)
 
 # 前後文分群時，每篇文件最多讀前多少字元
 _CONTEXT_MAX_CHARS = 60000
@@ -52,7 +59,8 @@ _PRUNE_MIN_DOCS = 10
 METHODS = ("kmeans", "hier")
 METHOD_NAMES = {"kmeans": "k-means", "hier": "階層式 (average linkage)"}
 
-_lock = threading.Lock()
+_lock = threading.Lock()         # 保護 _state 與 _cache 的讀寫
+_build_lock = threading.Lock()   # 「檢查是否已建好 + 建矩陣」整段包在這把鎖裡：同時來兩個請求時只會有一條執行緒在建
 _state = {"ready": False, "matrix": None, "doc_index": None, "terms": None}
 _cache = OrderedDict()   # (doc_ids, method, k) -> 分群結果，只留最近幾筆
 _CACHE_SIZE = 16
@@ -63,9 +71,14 @@ _CACHE_SIZE = 16
 def build_doc_matrix():
     """(退回用) 由倒排索引建出「文件 x 詞」稀疏矩陣 (csr)，每列是長度為 1 的 TF-IDF 向量。需先 Search.load_index()。
     Search 有 get_doc_vector 時不需要。cluster() 第一次呼叫會自動建立；想事先建好 (例如網頁啟動時) 可以自己呼叫。"""
-    with _lock:
-        if _state["ready"]:
-            return
+    with _build_lock:
+        with _lock:
+            if _state["ready"]:
+                return
+        _build_matrix()
+
+
+def _build_matrix():
     doc_ids = sorted(Search.doc_lengths)
     doc_index = {doc_id: row for row, doc_id in enumerate(doc_ids)}
     lengths = Search.doc_lengths
@@ -132,14 +145,18 @@ def _submatrix_from_vectors(doc_ids):
     return _matrix_from_dicts(ids, vectors)
 
 
+@functools.lru_cache(maxsize=64)         # 有上限，網頁長時間執行、查詢很多時記憶體也不會一直上升
 def _hit_pattern(query_terms):
-    """在小寫文字裡粗略找出查詢詞出現位置的正規表示式 (比對詞幹的前綴 + 任意後綴；Porter 詞幹常只改字尾，
-    例如 family -> famili，所以詞幹 4 個字元以上時少取最後一個字元)。只用來挑出要切詞的片段，找到後仍會用詞幹確認。"""
-    prefixes = sorted({re.escape(q[:max(3, len(q) - 1)] if len(q) > 3 else q) for q in query_terms})
-    return re.compile(r"\b(?:" + "|".join(prefixes) + r")\w*")
-
-
-_pattern_cache = {}
+    """在小寫文字裡粗略找出查詢詞出現位置的正規表示式 (比對詞幹的前綴 + 任意後綴)。query_terms 要是 frozenset。
+    Porter 詞幹常只改字尾：例如 family -> famili，所以詞幹 4 個字元以上時少取最後一個字元；
+    3 個字元以內整個拿來當前綴，但結尾是 i 時也加上換成 y 的版本 (cry -> cri，原文是 cry)。
+    只用來挑出要切詞的片段，找到後仍會用詞幹確認。"""
+    prefixes = set()
+    for q in query_terms:
+        prefixes.add(q[:max(3, len(q) - 1)] if len(q) > 3 else q)
+        if len(q) <= 3 and q.endswith("i"):
+            prefixes.add(q[:-1] + "y")
+    return re.compile(r"\b(?:" + "|".join(sorted(re.escape(p) for p in prefixes)) + r")\w*")
 
 
 def _window_counts(tokens, query_terms, window):
@@ -173,9 +190,7 @@ def _context_vector(text, query_terms, window):
     只對每個出現位置前後各 window * 30 個字元的片段切詞 (靠得近的合併成一段)。"""
     text = text[:_CONTEXT_MAX_CHARS].lower()
     query_terms = frozenset(query_terms)
-    pattern = _pattern_cache.get(query_terms)
-    if pattern is None:
-        pattern = _pattern_cache[query_terms] = _hit_pattern(query_terms)
+    pattern = _hit_pattern(query_terms)
     margin = window * 30
     groups = []                                  # [片段起, 片段迄)，靠得近的命中合併
     for match in pattern.finditer(text):
@@ -202,16 +217,21 @@ def _context_vector(text, query_terms, window):
 
 
 def _submatrix_context(doc_ids, query_terms, get_text, window):
-    """前後文版的 _submatrix：回傳 (保留的 doc_ids, X, 詞)。
-    取不到內文、或內文裡找不到查詢詞的文件不分群 (用整頁向量補上會被導覽列、側欄帶走，自己聚成「網站群」)。"""
-    ids, vectors = [], []
+    """前後文版的 _submatrix：回傳 (保留的 doc_ids, X, 詞, 取不到內文的文件數)。
+    取不到內文 (get_text 回傳 None，例如網頁剛啟動、WARC 還沒掃完)、或內文裡找不到查詢詞的文件不分群
+    (用整頁向量補上會被導覽列、側欄帶走，自己聚成「網站群」)。"""
+    ids, vectors, missing = [], [], 0
     for doc_id in doc_ids:
         text = get_text(doc_id)
-        vector = _context_vector(text, query_terms, window) if text else None
+        if text is None:
+            missing += 1
+            continue
+        vector = _context_vector(text, query_terms, window)
         if vector:
             ids.append(doc_id)
             vectors.append(vector)
-    return _matrix_from_dicts(ids, vectors)
+    kept, X, terms = _matrix_from_dicts(ids, vectors)
+    return kept, X, terms, missing
 
 
 def _submatrix(doc_ids):
@@ -219,13 +239,14 @@ def _submatrix(doc_ids):
     回傳 (保留的 doc_ids, 稀疏矩陣 X, 欄位對應的詞)；索引裡沒有的文件會被略過。"""
     if hasattr(Search, "get_doc_vector"):
         return _submatrix_from_vectors(doc_ids)
-    if not _state["ready"]:
-        build_doc_matrix()          # 第一次呼叫時建立 (數秒)；網頁可在啟動時先在背景呼叫
-    kept = [d for d in doc_ids if d in _state["doc_index"]]
-    sub = _state["matrix"][[_state["doc_index"][d] for d in kept]]
+    build_doc_matrix()              # 第一次呼叫時建立 (數秒；已建好就馬上回來)；網頁可在啟動時先在背景呼叫
+    with _lock:
+        matrix, doc_index, all_terms = _state["matrix"], _state["doc_index"], _state["terms"]
+    kept = [d for d in doc_ids if d in doc_index]
+    sub = matrix[[doc_index[d] for d in kept]]
     columns = np.unique(sub.indices)
     sub = sub[:, columns].tocsr()
-    return kept, sub, [_state["terms"][c] for c in columns]
+    return kept, sub, [all_terms[c] for c in columns]
 
 
 # ---------------------------------------------------------------- 分群
@@ -252,6 +273,17 @@ def _distance_matrix(X):
     distance = (distance + distance.T) / 2
     np.fill_diagonal(distance, 0.0)
     return distance
+
+
+def _reseed_empty_clusters(centers, X, dist, counts):
+    """把空群的中心換成資料點 (就地修改 centers)：每個空群各拿一個「離現有中心最遠」的點，而且彼此不同，
+    否則同一輪有 2 個以上空群時會拿到同一個點，最後實際的群數會少於 k。
+    dist 是 (n, k) 的點到各中心的平方距離，counts 是每群目前的篇數。"""
+    empty = np.flatnonzero(counts == 0)
+    if len(empty):
+        farthest = np.argsort(-dist.min(axis=1))[:len(empty)]
+        for c, point in zip(empty, farthest):
+            centers[c] = X[[point]].toarray()[0]
 
 
 def _kmeans(X, k, n_init=5, max_iter=50, seed=0):
@@ -290,8 +322,7 @@ def _kmeans(X, k, n_init=5, max_iter=50, seed=0):
             counts = np.bincount(labels, minlength=k)
             member = sparse.csr_matrix((1.0 / counts[labels], (labels, everyone)), shape=(k, n))
             centers = (member @ X).toarray()    # 每群的平均向量 (一次稀疏矩陣乘法)
-            for c in np.flatnonzero(counts == 0):   # 空群：拿目前離中心最遠的點當新中心
-                centers[c] = X[[dist.min(axis=1).argmax()]].toarray()[0]
+            _reseed_empty_clusters(centers, X, dist, counts)
         inertia = float(sq_dist(centers)[everyone, labels].sum())
         if inertia < best_inertia:
             best_labels, best_inertia = labels, inertia
@@ -416,7 +447,10 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
     doc_ids 要依排名由高到低給，群內文件才會保持排名順序。
     前後文分群：query_terms (查詢詞幹的集合) 與 get_text (doc_id -> 內文或 None) 都有給才啟用，window 預設
     CLUSTER_CONTEXT_WINDOW；結果多一個 "context": {window, docs_with_hits, docs}，整頁分群時為 None。
-    內文裡找不到查詢詞的文件不分群 (不在 clusters / points / assignment 裡)；找得到的不到 3 篇時 no_structure 為 True。"""
+    內文裡找不到查詢詞的文件不分群 (不在 clusters / points / assignment 裡)；找得到的不到 3 篇時 no_structure 為 True。
+    有任何一篇取不到內文 (get_text 回傳 None) 時，這次的結果不會被快取。
+    no_structure 為 True 時整批當一群：自動選 k 分不出明顯的群，或手動指定的 k 不能用
+    (k 要介於 2 和文件數 - 1 之間，文件內容也不能幾乎相同)，後者 requested_k 為指定的 k。"""
     if method not in METHODS:
         raise ValueError(f"未知的分群方法：{method}")
     context = bool(query_terms) and get_text is not None
@@ -428,9 +462,9 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
             return _cache[key]
 
     started = time.perf_counter()
-    context_info = None
+    context_info, missing_text = None, 0
     if context:
-        kept, X, terms = _submatrix_context(doc_ids, frozenset(query_terms), get_text, window)
+        kept, X, terms, missing_text = _submatrix_context(doc_ids, frozenset(query_terms), get_text, window)
         context_info = {"window": window, "docs_with_hits": len(kept), "docs": len(doc_ids)}
     else:
         kept, X, terms = _submatrix(doc_ids)
@@ -442,6 +476,7 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
               "clusters": [], "points": [], "assignment": {}}
     if n:
         labels = np.zeros(n, dtype=int)
+        clustered = False
         if n >= 3:
             distance = _distance_matrix(X)
             labeler = _kmeans_labeler(X) if method == "kmeans" else _hier_labeler(distance)
@@ -452,8 +487,10 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
                 best = None
             if best is not None:
                 result["silhouette"], labels = best
-            elif not k:
-                result["no_structure"] = True
+                clustered = True
+        if not clustered and (n >= 3 or k):     # 自動選 k 分不出群，或手動指定的 k 不能用：整批當一群並說明原因
+            result["no_structure"] = True
+            result["requested_k"] = k
         cluster_done = time.perf_counter()
         # 群編號重排：大的群在前，同樣大小時最高排名文件在前的群在前
         raw_ids = sorted(set(labels.tolist()),
@@ -479,15 +516,16 @@ def analyze(doc_ids, method=CLUSTER_METHOD, k=None, contrast=True, query_terms=N
     result.setdefault("timing_ms", {"vectors": 0.0, "cluster": 0.0, "project": 0.0})
     result["elapsed_ms"] = (time.perf_counter() - started) * 1000
 
-    with _lock:
-        _cache[key] = result
-        while len(_cache) > _CACHE_SIZE:
-            _cache.popitem(last=False)
+    if missing_text == 0:                       # 有文件還讀不到內文時不快取，內文讀得到之後才會算出完整的結果
+        with _lock:
+            _cache[key] = result
+            while len(_cache) > _CACHE_SIZE:
+                _cache.popitem(last=False)
     return result
 
 
 def display_label(terms, surface=None):
-    """標籤：詞用空白隔開 (INTERFACE.md)。surface 是 {詞幹: 原文常見寫法} (網頁顯示用，沒有就用詞幹)。"""
+    """標籤：詞用空白隔開。surface 是 {詞幹: 原文常見寫法} (網頁顯示用，沒有就用詞幹)。"""
     surface = surface or {}
     return " ".join(surface.get(term, term) for term in terms) or "(其他)"
 
@@ -557,7 +595,7 @@ def main():
 
 
 # ---------------------------------------------------------------- 網頁前端片段 (交給 C 接進 WebApp.py)
-# 只輸出 HTML 字串，不碰 WebApp.py。用法見 clustering_integration.md。
+# 只輸出 HTML 字串，不碰 WebApp.py。
 
 # 群的顏色 (淺色與深色模式都看得清楚)
 PALETTE = ("#2455d8", "#e8590c", "#2b9348", "#9c36b5", "#d6336c", "#0c8599", "#a67c00", "#6c757d")
@@ -623,6 +661,9 @@ def no_structure_text(analysis):
     if context and context["docs_with_hits"] < 3:
         return (f"前後文分群需要在文件內文裡找到查詢詞，前 {context['docs']} 篇只有 {context['docs_with_hits']} 篇找到，"
                 f"因此不分群。")
+    if analysis.get("requested_k"):
+        return (f"前 {len(analysis['assignment'])} 篇沒辦法分成 {analysis['requested_k']} 群 "
+                f"(群數要介於 2 和文件數 − 1 之間，文件內容也不能幾乎相同)，因此不分群。")
     detail = ""
     if analysis.get("rejected_silhouette") is not None:
         detail = f" (最佳 silhouette {analysis['rejected_silhouette']:.2f}，低於門檻 {CLUSTER_MIN_SILHOUETTE})"
@@ -676,7 +717,9 @@ def render_scatter(analysis, doc_link, selected=None, titles=None, ranks=None, s
         dim = selected is not None and cluster_id != selected    # 被選的群最後畫 (在最上層)
         cx = pad + (x - x_low) / x_span * (width - 2 * pad)
         cy = height - pad - (y - y_low) / y_span * (height - 2 * pad)
-        tip = html.escape(f"{ranks.get(doc_id, '')}. {(titles.get(doc_id) or doc_id)[:80]}\n群 {cluster_id}：{labels[cluster_id]}")
+        rank = ranks.get(doc_id)
+        head = f"{rank}. " if rank else ""
+        tip = html.escape(f"{head}{(titles.get(doc_id) or doc_id)[:80]}\n群 {cluster_id}：{labels[cluster_id]}")
         circles.append(
             f"<a href='{html.escape(doc_link(doc_id))}'><circle cx='{cx:.1f}' cy='{cy:.1f}' "
             f"r='{4 if dim else 5.5}' fill='{cluster_color(cluster_id)}' "
@@ -687,7 +730,6 @@ def render_scatter(analysis, doc_link, selected=None, titles=None, ranks=None, s
             f"{''.join(circles)}"
             f"<text x='{width - pad}' y='{height - 6}' text-anchor='end'>PC1</text>"
             f"<text x='8' y='{pad - 8}'>PC2</text></svg></div>")
-
 
 if __name__ == "__main__":
     main()
