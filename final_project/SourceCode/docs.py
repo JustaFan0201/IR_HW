@@ -40,18 +40,20 @@ class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts, self.title_parts, self._skip, self._in_title = [], [], 0, False
+        self._title_done = False  # 只有第一個有文字的 <title> 當標題；之後的 (例如內文 SVG 的 <title>) 算內文
 
     def handle_starttag(self, tag, attrs):
         if tag in self.SKIP:
             self._skip += 1
-        elif tag == "title":
+        elif tag == "title" and not self._title_done:
             self._in_title = True
 
     def handle_endtag(self, tag):
         if tag in self.SKIP and self._skip:
             self._skip -= 1
-        elif tag == "title":
+        elif tag == "title" and self._in_title:
             self._in_title = False
+            self._title_done = bool(self.title_parts)
 
     def handle_data(self, data):
         if self._skip:
