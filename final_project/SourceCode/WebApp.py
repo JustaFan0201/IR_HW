@@ -1,4 +1,4 @@
-"""HW2 加分：網頁搜尋介面 (只用 Python 標準函式庫，不需額外套件)。
+"""IR 期末專案：網頁搜尋介面 (由 HW2 的網頁介面延伸)。
 
     python SourceCode/WebApp.py [--port 8000] [--top 10] [--weighting tfidf] [--champion R]
 
@@ -151,7 +151,7 @@ class App:
         examples = " ".join(
             f"<a href='/?q={html.escape(requests_quote(e))}&weighting={weighting}&top={top}'>{html.escape(e)}</a>"
             for e in EXAMPLES)
-        return (f"<h1>IR HW2 搜尋</h1><p class='sub'>向量空間模型 (TF-IDF + cosine)，索引來自 HW1，共 {Search.TOTAL_DOCS:,} 篇</p>"
+        return (f"<h1>IR 期末專案搜尋</h1><p class='sub'>向量空間模型 (TF-IDF + cosine)，索引來自 HW1，共 {Search.TOTAL_DOCS:,} 篇</p>"
                 f"<form class='search' action='/' method='get'>"
                 f"<input type='text' name='q' value='{html.escape(q, quote=True)}' placeholder='例如：hong AND NOT kong' autofocus>"
                 f"<select name='weighting'>{weight_options}</select><select name='top'>{top_options}</select>"
@@ -176,7 +176,7 @@ class App:
         body = [self.search_form(q, weighting, top)]
         if q:
             body.append(self.results(q, weighting, top, apply_suggestions, rel_ids, nonrel_ids))
-        return page("IR HW2 搜尋" if not q else f"{q} - IR HW2 搜尋", "".join(body))
+        return page("IR 期末專案搜尋" if not q else f"{q} - IR 期末專案搜尋", "".join(body))
 
     def results(self, q, weighting, top, apply_suggestions, rel_ids=(), nonrel_ids=()):
         started = time.perf_counter()
@@ -318,7 +318,7 @@ def make_handler(app):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="IR HW2: 網頁搜尋介面")
+    parser = argparse.ArgumentParser(description="IR 期末專案：網頁搜尋介面")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--top", type=Search.positive_int, default=TOP_K, help="預設顯示前 N 名")
