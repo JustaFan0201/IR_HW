@@ -169,8 +169,9 @@ class App:
         apply_suggestions = params.get("apply", ["0"])[0] == "1"
         rel_ids, nonrel_ids = params.get("rel", []), params.get("nonrel", [])
         both = set(rel_ids) & set(nonrel_ids)  # 同時勾 👍 和 👎 視為沒標
-        rel_ids = list(dict.fromkeys(d for d in rel_ids if d not in both))
-        nonrel_ids = list(dict.fromkeys(d for d in nonrel_ids if d not in both))
+        # 不在索引裡的 ID 丟掉：rocchio 會跳過它們，但仍會算進 β/γ 的分母，篇數顯示也會不對
+        rel_ids = list(dict.fromkeys(d for d in rel_ids if d not in both and d in Search.doc_lengths))
+        nonrel_ids = list(dict.fromkeys(d for d in nonrel_ids if d not in both and d in Search.doc_lengths))
 
         body = [self.search_form(q, weighting, top)]
         if q:
