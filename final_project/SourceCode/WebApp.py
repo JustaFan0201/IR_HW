@@ -17,9 +17,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import Search
+import feedback
 from docs import DocStore
 from analyzer import analyze, token_spans
-from config import BASE_DIR, DEFAULT_WEIGHTING, TOP_K, WARC_FILE_PATH
+from config import (BASE_DIR, DEFAULT_WEIGHTING, ROCCHIO_ALPHA, ROCCHIO_BETA, ROCCHIO_GAMMA, TOP_K,
+                    WARC_FILE_PATH)
 
 SNIPPET_CHARS = 300
 FULL_TEXT_CHARS = 100_000
@@ -69,6 +71,34 @@ def make_snippet(text, terms):
     return ("… " if start else "") + highlight(piece, terms) + (" …" if start + len(piece) < len(text) else "")
 
 
+# ---------------------------------------------------------------- 相關回饋 (模組 A 的 rocchio)
+
+FEEDBACK_SHOWN_TERMS = 10  # 結果頁顯示 Rocchio 加入的前幾個詞
+
+
+def scoring_terms(q, suggestions, apply_suggestions):
+    """與 Search.search 相同的計分詞與布林運算式 (含拼字建議替換)，回傳 (terms, expression)。"""
+    expression = Search.parse_boolean_query(q)
+    if expression is not None:
+        if apply_suggestions and suggestions:
+            expression = Search.replace_boolean_terms(expression, suggestions)
+        return Search.get_boolean_terms(expression), expression
+    terms = analyze(q)
+    if apply_suggestions:
+        terms = [suggestions[t][0] if t in suggestions else t for t in terms]
+    return terms, None
+
+
+def rocchio_rerank(q, suggestions, apply_suggestions, rel_ids, nonrel_ids):
+    """以 Rocchio 修正查詢向量後用 tfidf cosine 重查；布林查詢仍限制在符合運算式的文件內。
+    回傳 (results, 新加入的詞 [(詞, 權重)])。"""
+    terms, expression = scoring_terms(q, suggestions, apply_suggestions)
+    new_vec = feedback.rocchio(Search.query_vector(terms), rel_ids, nonrel_ids)
+    allowed = Search.evaluate_boolean_query(expression) if expression is not None else None
+    added = sorted(((t, w) for t, w in new_vec.items() if t not in set(terms)), key=lambda x: x[1], reverse=True)
+    return Search.rank_by_vector(new_vec, allowed), added[:FEEDBACK_SHOWN_TERMS]
+
+
 # ---------------------------------------------------------------- 頁面
 
 CSS = """
@@ -91,7 +121,14 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 .snippet{margin-top:4px;word-break:break-word}mark{background:var(--mark);color:inherit;padding:0 2px;border-radius:3px}
 .fulltext{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;white-space:pre-wrap;word-break:break-word}
 .empty{color:var(--muted);padding:20px 0}
+.votes{margin-left:12px}.votes label{margin-right:8px;cursor:pointer;font-family:system-ui,sans-serif;font-size:14px}
+.votes input{vertical-align:middle;margin:0 3px 0 0}.fbbar{margin:10px 0}
 """
+
+# 同一篇的 👍 和 👎 互斥：勾一個就取消另一個
+VOTE_SCRIPT = """<script>document.querySelectorAll('.votes input').forEach(function(box){
+box.addEventListener('change',function(){if(!box.checked)return;
+box.closest('.votes').querySelectorAll('input').forEach(function(o){if(o!==box)o.checked=false;});});});</script>"""
 
 
 def page(title, body):
@@ -130,23 +167,36 @@ class App:
         except ValueError:
             top = self.top
         apply_suggestions = params.get("apply", ["0"])[0] == "1"
+        rel_ids, nonrel_ids = params.get("rel", []), params.get("nonrel", [])
+        both = set(rel_ids) & set(nonrel_ids)  # 同時勾 👍 和 👎 視為沒標
+        rel_ids = list(dict.fromkeys(d for d in rel_ids if d not in both))
+        nonrel_ids = list(dict.fromkeys(d for d in nonrel_ids if d not in both))
 
         body = [self.search_form(q, weighting, top)]
         if q:
-            body.append(self.results(q, weighting, top, apply_suggestions))
+            body.append(self.results(q, weighting, top, apply_suggestions, rel_ids, nonrel_ids))
         return page("IR HW2 搜尋" if not q else f"{q} - IR HW2 搜尋", "".join(body))
 
-    def results(self, q, weighting, top, apply_suggestions):
+    def results(self, q, weighting, top, apply_suggestions, rel_ids=(), nonrel_ids=()):
         started = time.perf_counter()
         try:
             results, suggestions, notes = Search.search(
                 q, interactive=False, weighting=weighting, use_champion=self.champion is not None,
                 top_k=top, apply_suggestions=apply_suggestions)
+            use_feedback = bool(rel_ids or nonrel_ids)
+            if use_feedback:
+                results, added = rocchio_rerank(q, suggestions, apply_suggestions, rel_ids, nonrel_ids)
         except ValueError as error:
             return f"<div class='notice'>查詢錯誤：{html.escape(str(error))}</div>"
         elapsed = (time.perf_counter() - started) * 1000
 
         parts = []
+        if use_feedback:
+            added_text = "、".join(html.escape(t) for t, _ in added) or "(無)"
+            clear = f"/?q={requests_quote(q)}&weighting={weighting}&top={top}" + ("&apply=1" if apply_suggestions else "")
+            parts.append(f"<div class='notice'>相關回饋 (Rocchio α={ROCCHIO_ALPHA}, β={ROCCHIO_BETA}, γ={ROCCHIO_GAMMA})："
+                         f"👍 {len(rel_ids)} 篇、👎 {len(nonrel_ids)} 篇，以 tfidf cosine 重新排序。"
+                         f"加入權重最高的詞：{added_text} — <a href='{html.escape(clear)}'>清除回饋</a></div>")
         for note in notes:
             parts.append(f"<div class='notice'>萬用字元：{html.escape(note)}</div>")
         if suggestions:
@@ -157,24 +207,39 @@ class App:
                 link = f"/?q={requests_quote(q)}&weighting={weighting}&top={top}&apply=1"
                 parts.append(f"<div class='notice'>拼字建議：{lines} — <a href='{html.escape(link)}'>改用第一個建議搜尋</a></div>")
 
-        mode = "，champion list 近似計分" if self.champion is not None else ""
+        if use_feedback:
+            mode = "tfidf cosine + Rocchio 回饋"
+        else:
+            mode = weighting + ("，champion list 近似計分" if self.champion is not None else "")
         parts.append(f"<div class='meta'>命中 {len(results):,} 篇，顯示前 {min(top, len(results))} 名 · "
-                     f"{weighting}{mode} · {elapsed:.0f} ms</div>")
+                     f"{mode} · {elapsed:.0f} ms</div>")
         if not results:
             parts.append("<div class='empty'>找不到符合的搜尋結果。</div>")
             return "".join(parts)
 
+        # 結果列表包在回饋表單裡：勾 👍／👎 後按按鈕，標記以 rel / nonrel 參數帶到網址，可多輪累積
+        hidden = "".join(f"<input type='hidden' name='{k}' value='{html.escape(str(v), quote=True)}'>"
+                         for k, v in (("q", q), ("weighting", weighting), ("top", top)))
+        hidden += "<input type='hidden' name='apply' value='1'>" if apply_suggestions else ""
+        submit = "<div class='fbbar'><button type='submit'>依回饋重新搜尋</button> <span class='meta'>勾選 👍 相關／👎 不相關的結果</span></div>"
+        parts.append(f"<form class='feedback' action='/' method='get'>{hidden}{submit}")
+        rel_set, nonrel_set = set(rel_ids), set(nonrel_ids)
         terms = query_terms_for_highlight(q, suggestions)
         for rank, (doc_id, score) in enumerate(results[:top], 1):
             doc = self.store.get(doc_id) if self.store.ready else None
             title = (doc[0] if doc and doc[0] else doc_id)
             snippet = make_snippet(doc[1], terms) if doc else ""
             link = f"/doc?id={requests_quote(doc_id)}&q={requests_quote(q)}" + ("&apply=1" if apply_suggestions else "")
+            value = html.escape(doc_id, quote=True)
+            votes = (f"<span class='votes'>"
+                     f"<label title='相關'><input type='checkbox' name='rel' value='{value}'{' checked' if doc_id in rel_set else ''}>👍</label>"
+                     f"<label title='不相關'><input type='checkbox' name='nonrel' value='{value}'{' checked' if doc_id in nonrel_set else ''}>👎</label></span>")
             parts.append(
                 f"<div class='result'><span class='score'>{score:.6f}</span>"
                 f"<div class='title'>{rank}. <a href='{html.escape(link)}'>{highlight(title[:120], terms)}</a></div>"
-                f"<div class='id'>{html.escape(doc_id)}</div>"
+                f"<div class='id'>{html.escape(doc_id)}{votes}</div>"
                 + (f"<div class='snippet'>{snippet}</div>" if snippet else "") + "</div>")
+        parts.append(f"{submit}</form>{VOTE_SCRIPT}")
         if not self.store.ready:
             parts.append("<div class='meta'>(" + ("摘要尚未準備好：正在掃描 WARC 檔，稍後重新整理即可。" if self.store.available
                                                     else "找不到 WARC 檔，因此不顯示摘要。") + ")</div>")

@@ -677,6 +677,31 @@ def get_doc_vector(doc_id: str) -> dict[str, float]:
         doc_vec[term] = (1 + math.log10(tf)) * idf
     return doc_vec
 
+def query_vector(query_terms: list[str]) -> dict[str, float]:
+    """查詢詞轉成 tfidf 查詢向量 {term: idf}，正規化成單位長度 (與 rocchio 內正規化後的文件向量同尺度)。
+    權重與 tfidf 方案的 _rank_once 相同，所以 rank_by_vector(query_vector(terms)) 的排序等於 tfidf 排序。"""
+    weights = {t: math.log10(TOTAL_DOCS / inverted_index[t]["df"]) for t in query_terms if t in inverted_index}
+    length = math.sqrt(sum(w * w for w in weights.values()))
+    return {t: w / length for t, w in weights.items()} if length else {}
+
+def rank_by_vector(query_vec: dict[str, float], allowed_doc_ids=None) -> list[tuple[str, float]]:
+    """依加權查詢向量 {term: 權重} 計算 tfidf cosine similarity，回傳 [(docID, score)] (分數高到低)。
+    給相關回饋 (Rocchio) 重查用；文件權重同 tfidf 方案 (1+log tf)·idf。"""
+    query_vec = {t: w for t, w in query_vec.items() if w > 0 and t in inverted_index}
+    query_length = math.sqrt(sum(w * w for w in query_vec.values()))
+    if query_length == 0:
+        return []
+    scores = {}
+    for term, q_weight in query_vec.items():
+        idf = math.log10(TOTAL_DOCS / inverted_index[term]["df"])
+        for doc_id, tf in inverted_index[term]["postings"].items():
+            if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
+                continue
+            scores[doc_id] = scores.get(doc_id, 0.0) + q_weight * (1 + math.log10(tf)) * idf
+    results = [(doc_id, dot / (query_length * doc_lengths[doc_id])) for doc_id, dot in scores.items()]
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="IR HW2: 向量空間模型搜尋 (TF-IDF + cosine similarity)")
     parser.add_argument("--top", type=positive_int, default=TOP_K,
