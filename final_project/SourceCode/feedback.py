@@ -1,6 +1,6 @@
 import Search as S
 from analyzer import analyze
-from config import ROCCHIO_ALPHA, ROCCHIO_BETA, ROCCHIO_GAMMA, EXPAND_TERMS_M
+from config import ROCCHIO_ALPHA, ROCCHIO_BETA, ROCCHIO_GAMMA, EXPAND_TERMS_M, TOP_K
 
 def rocchio(query_vec: dict[str, float],
             rel_ids: list[str],
@@ -73,3 +73,33 @@ def expand_terms(query: str,
 
     ranked = sorted(term_scores.items(), key=lambda x: x[1], reverse=True)
     return ranked[:m]
+
+def prf(query: str, k: int = TOP_K, max_vec_terms: int = 50, max_df_ratio: float = 0.05) -> list[tuple[str, float]]:
+    """虛擬相關回饋 (Pseudo Relevance Feedback)：
+    先搜一次取前 k 篇，假設它們是相關的，用 Rocchio 改寫查詢後重新搜尋。
+
+    max_vec_terms：Rocchio 算出的新向量只保留權重最高的前 N 個詞。
+    max_df_ratio：排除 df 佔總文件數比例超過此值的詞 (太常見/雜訊詞，
+    避免少數高 df 詞讓查詢向量幾乎命中全部文件)。
+    """
+    initial_results, _, _ = S.search(query, interactive=False, top_k=k)
+    top_k_ids = [doc_id for doc_id, _ in initial_results[:k]]
+    if not top_k_ids:
+        return []
+
+    query_terms = analyze(query)
+    query_vec = S.query_vector(query_terms)
+    new_query_vec = rocchio(query_vec, rel_ids=top_k_ids, nonrel_ids=[])
+
+    max_df = S.TOTAL_DOCS * max_df_ratio
+    filtered = {
+        t: w for t, w in new_query_vec.items()
+        if t in S.inverted_index and S.inverted_index[t]["df"] <= max_df
+    }
+    if len(filtered) > max_vec_terms:
+        top_terms = sorted(filtered.items(), key=lambda x: x[1], reverse=True)[:max_vec_terms]
+        filtered = dict(top_terms)
+
+    return S.rank_by_vector(filtered)
+
+METHODS = {"prf": prf}
