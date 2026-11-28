@@ -14,3 +14,6 @@ env/
 .vscode/
 .idea/
 Thumbs.db
+# 語意檢索向量 (python semantic.py --build 產生)
+*.npy
+semantic_doc_ids.txt

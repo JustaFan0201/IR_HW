@@ -56,3 +56,10 @@ CLUSTER_LABEL_TERMS = 3        # 群標籤用幾個詞
 CLUSTER_MIN_SILHOUETTE = 0.05  # 自動選群數時，最佳 silhouette 低於此值就不分群
 CLUSTER_MIN_SIZE = 3           # 自動選群數時，每群至少幾篇 (與前 N 篇的 5% 取大者)
 CLUSTER_CONTEXT_WINDOW = 15    # 「查詢詞前後文」分群：查詢詞前後各取幾個詞
+
+# semantic.py 設定參數 (模組 C：語意檢索)
+SEMANTIC_MODEL = "all-MiniLM-L6-v2"
+SEMANTIC_BODY_WORDS = 200  # 每篇取標題 + 內文前幾個字編碼
+SEMANTIC_BATCH_SIZE = 64
+SEMANTIC_VECTORS_PATH = os.path.join(BASE_DIR, "semantic_vectors.npy")   # 文件向量 (已正規化)，不進 git
+SEMANTIC_IDS_PATH = os.path.join(BASE_DIR, "semantic_doc_ids.txt")       # 向量列順序對應的 doc ID，不進 git
