@@ -11,6 +11,7 @@
 摘要與全文來自 HW1 的 WARC 檔 (config.py 的 WARC_FILE_PATH)；找不到該檔時仍可搜尋，只是不顯示摘要。
 """
 import argparse
+import hashlib
 import html
 import threading
 import time
@@ -152,13 +153,16 @@ class App:
 
     # ------------------------------------------------ 網址
     def view_url(self, q, weighting, top, cm, k, cl=None, apply=False, cx=CONTEXT_PAGE,
-                 rel_ids=(), nonrel_ids=()):
-        """搜尋結果網址，保留分群、拼字建議與相關回饋狀態。"""
+                 rel_ids=(), nonrel_ids=(), cs=None):
+        """搜尋結果網址，保留分群、拼字建議與相關回饋狀態。
+        cl (群編號) 只在同一次分群裡有意義，所以一律連同該次分群的簽章 cs 一起帶；cs 對不上就忽略 cl。"""
         parts = [f"q={requests_quote(q)}", f"weighting={weighting}", f"top={top}", f"cm={cm}", f"cx={cx}"]
         if k:
             parts.append(f"k={k}")
         if cl is not None:
             parts.append(f"cl={cl}")
+            if cs:
+                parts.append(f"cs={cs}")
         if apply:
             parts.append("apply=1")
         parts.extend(f"rel={requests_quote(doc_id)}" for doc_id in rel_ids)
@@ -181,7 +185,8 @@ class App:
         k_options = "<option value=''>群數：自動</option>" + "".join(
             f"<option value='{n}'{' selected' if n == k else ''}>{n} 群</option>" for n in K_CHOICES)
         examples = " ".join(
-            f"<a href='/?q={html.escape(requests_quote(e))}&weighting={weighting}&top={top}&cm={cm}&cx={cx}'>{html.escape(e)}</a>"
+            f"<a href='/?q={html.escape(requests_quote(e))}&weighting={weighting}&top={top}&cm={cm}&cx={cx}"
+            f"{f'&k={k}' if k else ''}'>{html.escape(e)}</a>"
             for e in EXAMPLES)
         return (f"<h1>IR HW2 搜尋</h1><p class='sub'>向量空間模型 (TF-IDF + cosine)，索引來自 HW1，共 {Search.TOTAL_DOCS:,} 篇</p>"
                 f"<form class='search' action='/' method='get'>"
@@ -215,6 +220,7 @@ class App:
             cl = int(params["cl"][0]) if "cl" in params else None
         except ValueError:
             cl = None
+        cs = params.get("cs", [None])[0]
         apply_suggestions = params.get("apply", ["0"])[0] == "1"
         rel_ids, nonrel_ids = params.get("rel", []), params.get("nonrel", [])
         both = set(rel_ids) & set(nonrel_ids)  # 同時勾 👍 和 👎 視為沒標
@@ -225,17 +231,19 @@ class App:
         body = [self.search_form(q, weighting, top, cm, k, cx)]
         if q:
             body.append(self.results(q, weighting, top, apply_suggestions, cm, k, cl, cx,
-                                     rel_ids, nonrel_ids))
+                                     rel_ids, nonrel_ids, cs))
         return page("IR HW2 搜尋" if not q else f"{q} - IR HW2 搜尋", "".join(body))
 
     # ------------------------------------------------ 結果頁
     def results(self, q, weighting, top, apply_suggestions, cm=CLUSTER_OFF, k=None, cl=None, cx=CONTEXT_PAGE,
-                rel_ids=(), nonrel_ids=()):
+                rel_ids=(), nonrel_ids=(), cs=None):
         started = time.perf_counter()
+        # (3) 要分群時，champion list 模式也要保證至少有 CLUSTER_TOP_N 篇精確計分的結果 (不足時 Search 會退回精確計分)
+        search_top = top if cm == CLUSTER_OFF else max(top, CLUSTER_TOP_N)
         try:
             results, suggestions, notes = Search.search(
                 q, interactive=False, weighting=weighting, use_champion=self.champion is not None,
-                top_k=top, apply_suggestions=apply_suggestions)
+                top_k=search_top, apply_suggestions=apply_suggestions)
             use_feedback = bool(rel_ids or nonrel_ids)
             if use_feedback:
                 results, added = rocchio_rerank(q, suggestions, apply_suggestions, rel_ids, nonrel_ids)
@@ -246,7 +254,7 @@ class App:
         parts = []
         if use_feedback:
             added_text = "、".join(html.escape(t) for t, _ in added) or "(無)"
-            clear = self.view_url(q, weighting, top, cm, k, cl, apply_suggestions, cx)
+            clear = self.view_url(q, weighting, top, cm, k, None, apply_suggestions, cx)  # 清掉回饋後結果清單不同，不帶 cl
             parts.append(f"<div class='notice'>相關回饋 (Rocchio α={ROCCHIO_ALPHA}, β={ROCCHIO_BETA}, γ={ROCCHIO_GAMMA})："
                          f"👍 {len(rel_ids)} 篇、👎 {len(nonrel_ids)} 篇，以 tfidf cosine 重新排序。"
                          f"加入權重最高的詞：{added_text} — <a href='{html.escape(clear)}'>清除回饋</a></div>")
@@ -263,14 +271,17 @@ class App:
 
         terms = query_terms_for_highlight(q, suggestions)
         # 分群：只對排名前 CLUSTER_TOP_N 篇做 (顯示筆數不影響分群範圍)
-        analysis, surface, selected, no_structure_notice = None, {}, None, ""
+        analysis, surface, selected, no_structure_notice, signature = None, {}, None, "", None
         if cm != CLUSTER_OFF and results:
             if clustering.is_ready():
                 context_kwargs = {}
                 if cx == CONTEXT_QUERY:             # 只取查詢詞前後文分群：需要文件內文 (WARC 摘要資料)
                     if self.store.ready:
-                        context_kwargs = dict(query_terms=frozenset(terms),
-                                              get_text=lambda d: (self.store.get(d) or (None, None))[1])
+                        # 前後文要用實際拿去計分的詞 (含是否套用拼字建議)；terms 含未套用的建議，只用來標示
+                        scored = scoring_terms(q, suggestions, apply_suggestions)[0]
+                        # store 已就緒時，WARC 裡沒有的文件是「永遠不存在」，給空字串當沒有命中 (None 代表還取不到內文，不快取)
+                        context_kwargs = dict(query_terms=frozenset(scored),
+                                              get_text=lambda d: (self.store.get(d) or (None, ""))[1])
                     else:
                         parts.append("<div class='notice'>前後文分群需要文件內文 (WARC 還在掃描)，這次先用整頁分群。</div>")
                 analysis = clustering.analyze([doc_id for doc_id, _ in results[:CLUSTER_TOP_N]], cm, k, **context_kwargs)
@@ -280,14 +291,17 @@ class App:
                 else:
                     surface = clustering.surface_forms(
                         analysis, lambda d: (self.store.get(d) or (None, None))[1] if self.store.ready else None)
-                    if cl is not None and 0 <= cl < len(analysis["clusters"]):
+                    signature = cluster_signature(analysis)
+                    # (1) cl 只在產生它的那次分群裡有意義：簽章對不上 (結果清單或分群方式變了) 就忽略
+                    if cl is not None and cs == signature and 0 <= cl < len(analysis["clusters"]):
                         selected = cl
             else:
                 parts.append("<div class='notice'>分群功能準備中 (正在建立文件向量)，稍後重新整理即可。</div>")
 
-        mode = weighting + ("，champion list 近似計分" if self.champion is not None else "")
-        if use_feedback:
-            mode += " + Rocchio 回饋 (tfidf cosine)"
+        if use_feedback:                    # rocchio_rerank 一律用精確的 tfidf cosine，權重方案與 champion list 都沒用到
+            mode = "tfidf cosine + Rocchio 回饋"
+        else:
+            mode = weighting + ("，champion list 近似計分" if self.champion is not None else "")
         if selected is not None:
             shown = analysis["clusters"][selected]["doc_ids"]
             shown_text = f"群 {selected} 的 {len(shown)} 篇"
@@ -306,7 +320,7 @@ class App:
 
         def doc_link(doc_id):
             back = self.view_url(q, weighting, top, cm, k, selected, apply_suggestions, cx,
-                                 rel_ids, nonrel_ids)
+                                 rel_ids, nonrel_ids, signature)
             link = f"/doc?id={requests_quote(doc_id)}&q={requests_quote(q)}"
             if apply_suggestions:
                 link += "&apply=1"
@@ -321,6 +335,7 @@ class App:
             hidden_values.append(("k", k))
         if selected is not None:
             hidden_values.append(("cl", selected))
+            hidden_values.append(("cs", signature))
         if apply_suggestions:
             hidden_values.append(("apply", "1"))
         hidden = "".join(
@@ -367,7 +382,7 @@ class App:
         sidebar = clustering.render_sidebar(
             analysis,
             lambda cluster_id: self.view_url(q, weighting, top, cm, k, cluster_id, apply_suggestions, cx,
-                                             rel_ids, nonrel_ids),
+                                             rel_ids, nonrel_ids, signature),
             selected, surface)
         titles = {d: (self.store.get(d) or ("", ""))[0] for d in analysis["assignment"]} if self.store.ready else {}
         plot = clustering.render_scatter(analysis, doc_link, selected, titles, rank_of, surface)
@@ -396,6 +411,13 @@ class App:
         return page(doc[0] or doc_id,
                     f"<p><a href='{html.escape(back)}'>← 回搜尋結果</a></p><h1>{html.escape(doc[0] or doc_id)}</h1>"
                     f"<div class='id sub'>{html.escape(doc_id)}</div>{cut}<div class='fulltext'>{highlight(text, terms)}</div>")
+
+
+def cluster_signature(analysis):
+    """一次分群結果的簽章 (文件 -> 群編號的對應)：群編號只在同一次分群裡有意義，網址帶著它，
+    之後結果清單或分群方式變了就對不上，這時忽略網址上的群編號。"""
+    items = sorted(analysis["assignment"].items())
+    return hashlib.md5(repr(items).encode("utf-8")).hexdigest()[:10]
 
 
 def requests_quote(value):

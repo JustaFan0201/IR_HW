@@ -183,6 +183,23 @@ def _window_counts(tokens, query_terms, window):
     return counts, bool(ranges)
 
 
+_SNAP_MAX = 64   # 往外延伸的上限 (字元)，避免超長的無空白字串讓片段無限變長
+
+
+def _snap_to_word_boundary(text, low, high):
+    """片段 [low, high) 的兩端若切在字的中間，就往外延伸到最近的非字元位置，
+    否則 _TOKEN_RE 會把兩端的殘字 (international 切成 ational) 也切成 token，取詞幹後可能剛好是索引裡的詞。"""
+    steps = 0
+    while low > 0 and text[low - 1].isalnum() and text[low].isalnum() and steps < _SNAP_MAX:
+        low -= 1
+        steps += 1
+    steps = 0
+    while high < len(text) and text[high].isalnum() and text[high - 1].isalnum() and steps < _SNAP_MAX:
+        high += 1
+        steps += 1
+    return low, high
+
+
 def _context_vector(text, query_terms, window):
     """查詢詞每次出現位置前後各 window 個詞 (token) 的 TF-IDF 向量 {詞: 權重}，查詢詞本身不算；
     文字裡找不到查詢詞時回傳 None。tf-idf 的 idf 用整個索引的 df，與整頁向量一致。
@@ -194,7 +211,7 @@ def _context_vector(text, query_terms, window):
     margin = window * 30
     groups = []                                  # [片段起, 片段迄)，靠得近的命中合併
     for match in pattern.finditer(text):
-        low, high = max(0, match.start() - margin), min(len(text), match.end() + margin)
+        low, high = _snap_to_word_boundary(text, max(0, match.start() - margin), min(len(text), match.end() + margin))
         if groups and low <= groups[-1][1]:
             groups[-1][1] = high
         else:
@@ -218,7 +235,8 @@ def _context_vector(text, query_terms, window):
 
 def _submatrix_context(doc_ids, query_terms, get_text, window):
     """前後文版的 _submatrix：回傳 (保留的 doc_ids, X, 詞, 取不到內文的文件數)。
-    取不到內文 (get_text 回傳 None，例如網頁剛啟動、WARC 還沒掃完)、或內文裡找不到查詢詞的文件不分群
+    取不到內文 (get_text 回傳 None，只用在「暫時取不到」，例如網頁剛啟動、WARC 還沒掃完，這時結果不快取)、
+    或內文裡找不到查詢詞的文件不分群 (WARC 裡永遠沒有的文件，呼叫端應回傳空字串，當成沒有命中，結果才能快取)
     (用整頁向量補上會被導覽列、側欄帶走，自己聚成「網站群」)。"""
     ids, vectors, missing = [], [], 0
     for doc_id in doc_ids:
