@@ -47,6 +47,16 @@ ROCCHIO_GAMMA = 0.15 # 不相關文件向量權重
 # 盲目相關回饋 (PRF) 擴展詞數量
 EXPAND_TERMS_M = 5
 
+# clustering.py 參數 ----
+CLUSTER_TOP_N = 100            # 對排名前 N 篇結果分群
+CLUSTER_METHOD = "kmeans"      # kmeans 或 hier
+CLUSTER_K_MIN = 2              # 自動選群數 (silhouette) 的範圍
+CLUSTER_K_MAX = 6
+CLUSTER_LABEL_TERMS = 3        # 群標籤用幾個詞
+CLUSTER_MIN_SILHOUETTE = 0.05  # 自動選群數時，最佳 silhouette 低於此值就不分群
+CLUSTER_MIN_SIZE = 3           # 自動選群數時，每群至少幾篇 (與前 N 篇的 5% 取大者)
+CLUSTER_CONTEXT_WINDOW = 15    # 「查詢詞前後文」分群：查詢詞前後各取幾個詞
+
 # semantic.py 設定參數 (模組 C：語意檢索)
 SEMANTIC_MODEL = "all-MiniLM-L6-v2"
 SEMANTIC_BODY_WORDS = 200  # 每篇取標題 + 內文前幾個字編碼

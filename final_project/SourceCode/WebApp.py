@@ -6,28 +6,38 @@
   - 搜尋框 (支援布林、片語、鄰近、萬用字元) 與權重方案、顯示筆數選單
   - 拼字/發音建議，點一下就套用
   - 結果摘要並標示查詢詞 (highlighting)，點標題可看全文 (同樣標示)
+  - 結果分群 (模組 B)：對前 N 篇結果做 k-means / 階層式分群，左側欄顯示各群標籤與篇數，點一群只看該群；
+    上方的 2D 散佈圖 (PCA) 每個點是一篇文件、顏色是所屬群，點一個點就打開該篇文件
 摘要與全文來自 HW1 的 WARC 檔 (config.py 的 WARC_FILE_PATH)；找不到該檔時仍可搜尋，只是不顯示摘要。
 """
 import argparse
+import hashlib
 import html
-import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import Search
+import clustering
 import feedback
 from docs import DocStore
 from analyzer import analyze, token_spans
-from config import (BASE_DIR, DEFAULT_WEIGHTING, ROCCHIO_ALPHA, ROCCHIO_BETA, ROCCHIO_GAMMA, TOP_K,
+from config import (CLUSTER_METHOD, CLUSTER_TOP_N, DEFAULT_WEIGHTING, ROCCHIO_ALPHA, ROCCHIO_BETA,
+                    ROCCHIO_GAMMA, TOP_K,
                     WARC_FILE_PATH)
 
 SNIPPET_CHARS = 300
 FULL_TEXT_CHARS = 100_000
 TOP_CHOICES = (10, 20, 50, 100)
 EXAMPLES = ['airplanes', 'United States government', 'hong AND NOT kong', '"hong kong"~5',
-            'govern*', 'goverment', 'mikrosoft']
+            'govern*', 'goverment', 'mikrosoft', 'java', 'apple', 'jaguar']
+CLUSTER_OFF = "off"
+CLUSTER_CHOICES = (CLUSTER_OFF,) + clustering.METHODS
+K_CHOICES = (2, 3, 4, 5, 6, 7, 8)
+# 分群依據：整頁，或查詢詞前後文 (網頁的導覽列、側欄很多，整頁容易分出「哪個網站」而不是詞義)
+CONTEXT_PAGE, CONTEXT_QUERY = "page", "ctx"
+CONTEXT_NAMES = {CONTEXT_PAGE: "分群依據：整頁", CONTEXT_QUERY: "分群依據：查詢詞前後文"}
 
 
 # ---------------------------------------------------------------- 標示查詢詞
@@ -105,7 +115,7 @@ CSS = """
 :root{--bg:#f6f7f9;--fg:#1c2330;--muted:#667085;--card:#fff;--line:#e3e6eb;--accent:#2455d8;--mark:#ffe58a;--warn:#fff4d6;--warnfg:#6b4e00}
 @media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#e6e9ee;--muted:#9aa3b2;--card:#1d2128;--line:#2c323b;--accent:#7ea2ff;--mark:#6b5600;--warn:#3a3014;--warnfg:#f2d98a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif}
-main{max-width:820px;margin:0 auto;padding:24px 16px 60px}
+main{max-width:1100px;margin:0 auto;padding:24px 16px 60px}
 h1{font-size:22px;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 18px}
 form.search{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
 input[type=text]{flex:1 1 320px;padding:10px 12px;font-size:16px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
@@ -134,27 +144,56 @@ box.closest('.votes').querySelectorAll('input').forEach(function(o){if(o!==box)o
 def page(title, body):
     return (f"<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>"
             f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body><main>{body}</main></body></html>")
+            f"<title>{html.escape(title)}</title><style>{CSS}{clustering.CLUSTER_CSS}</style></head><body><main>{body}</main></body></html>")
 
 
 class App:
     def __init__(self, top, weighting, champion, store):
         self.top, self.weighting, self.champion, self.store = top, weighting, champion, store
 
-    def search_form(self, q, weighting, top):
+    # ------------------------------------------------ 網址
+    def view_url(self, q, weighting, top, cm, k, cl=None, apply=False, cx=CONTEXT_PAGE,
+                 rel_ids=(), nonrel_ids=(), cs=None):
+        """搜尋結果網址，保留分群、拼字建議與相關回饋狀態。
+        cl (群編號) 只在同一次分群裡有意義，所以一律連同該次分群的簽章 cs 一起帶；cs 對不上就忽略 cl。"""
+        parts = [f"q={requests_quote(q)}", f"weighting={weighting}", f"top={top}", f"cm={cm}", f"cx={cx}"]
+        if k:
+            parts.append(f"k={k}")
+        if cl is not None:
+            parts.append(f"cl={cl}")
+            if cs:
+                parts.append(f"cs={cs}")
+        if apply:
+            parts.append("apply=1")
+        parts.extend(f"rel={requests_quote(doc_id)}" for doc_id in rel_ids)
+        parts.extend(f"nonrel={requests_quote(doc_id)}" for doc_id in nonrel_ids)
+        return "/?" + "&".join(parts)
+
+    def search_form(self, q, weighting, top, cm, k, cx=CONTEXT_PAGE):
         weight_options = "".join(
             f"<option value='{w}'{' selected' if w == weighting else ''}>{w}</option>"
             for w in Search.WEIGHTING_SCHEMES)
         top_options = "".join(
             f"<option value='{n}'{' selected' if n == top else ''}>前 {n} 名</option>"
             for n in sorted(set(TOP_CHOICES) | {top}))
+        cluster_options = "".join(
+            f"<option value='{c}'{' selected' if c == cm else ''}>"
+            f"{'不分群' if c == CLUSTER_OFF else '分群：' + clustering.METHOD_NAMES[c]}</option>"
+            for c in CLUSTER_CHOICES)
+        context_options = "".join(
+            f"<option value='{c}'{' selected' if c == cx else ''}>{name}</option>" for c, name in CONTEXT_NAMES.items())
+        k_options = "<option value=''>群數：自動</option>" + "".join(
+            f"<option value='{n}'{' selected' if n == k else ''}>{n} 群</option>" for n in K_CHOICES)
         examples = " ".join(
-            f"<a href='/?q={html.escape(requests_quote(e))}&weighting={weighting}&top={top}'>{html.escape(e)}</a>"
+            f"<a href='/?q={html.escape(requests_quote(e))}&weighting={weighting}&top={top}&cm={cm}&cx={cx}"
+            f"{f'&k={k}' if k else ''}'>{html.escape(e)}</a>"
             for e in EXAMPLES)
         return (f"<h1>IR HW2 搜尋</h1><p class='sub'>向量空間模型 (TF-IDF + cosine)，索引來自 HW1，共 {Search.TOTAL_DOCS:,} 篇</p>"
                 f"<form class='search' action='/' method='get'>"
                 f"<input type='text' name='q' value='{html.escape(q, quote=True)}' placeholder='例如：hong AND NOT kong' autofocus>"
                 f"<select name='weighting'>{weight_options}</select><select name='top'>{top_options}</select>"
+                f"<select name='cm'>{cluster_options}</select><select name='cx'>{context_options}</select>"
+                f"<select name='k'>{k_options}</select>"
                 f"<button type='submit'>搜尋</button></form><div class='examples'>範例：{examples}</div>")
 
     def home(self, params):
@@ -166,6 +205,22 @@ class App:
             top = max(1, min(500, int(params.get("top", [self.top])[0])))
         except ValueError:
             top = self.top
+        cm = params.get("cm", [CLUSTER_METHOD])[0]
+        if cm not in CLUSTER_CHOICES:
+            cm = CLUSTER_METHOD
+        try:
+            k = int(params.get("k", [""])[0] or 0)
+        except ValueError:
+            k = 0
+        k = k if k in K_CHOICES else None
+        cx = params.get("cx", [CONTEXT_PAGE])[0]
+        if cx not in CONTEXT_NAMES:
+            cx = CONTEXT_PAGE
+        try:
+            cl = int(params["cl"][0]) if "cl" in params else None
+        except ValueError:
+            cl = None
+        cs = params.get("cs", [None])[0]
         apply_suggestions = params.get("apply", ["0"])[0] == "1"
         rel_ids, nonrel_ids = params.get("rel", []), params.get("nonrel", [])
         both = set(rel_ids) & set(nonrel_ids)  # 同時勾 👍 和 👎 視為沒標
@@ -173,17 +228,22 @@ class App:
         rel_ids = list(dict.fromkeys(d for d in rel_ids if d not in both and d in Search.doc_lengths))
         nonrel_ids = list(dict.fromkeys(d for d in nonrel_ids if d not in both and d in Search.doc_lengths))
 
-        body = [self.search_form(q, weighting, top)]
+        body = [self.search_form(q, weighting, top, cm, k, cx)]
         if q:
-            body.append(self.results(q, weighting, top, apply_suggestions, rel_ids, nonrel_ids))
+            body.append(self.results(q, weighting, top, apply_suggestions, cm, k, cl, cx,
+                                     rel_ids, nonrel_ids, cs))
         return page("IR HW2 搜尋" if not q else f"{q} - IR HW2 搜尋", "".join(body))
 
-    def results(self, q, weighting, top, apply_suggestions, rel_ids=(), nonrel_ids=()):
+    # ------------------------------------------------ 結果頁
+    def results(self, q, weighting, top, apply_suggestions, cm=CLUSTER_OFF, k=None, cl=None, cx=CONTEXT_PAGE,
+                rel_ids=(), nonrel_ids=(), cs=None):
         started = time.perf_counter()
+        # (3) 要分群時，champion list 模式也要保證至少有 CLUSTER_TOP_N 篇精確計分的結果 (不足時 Search 會退回精確計分)
+        search_top = top if cm == CLUSTER_OFF else max(top, CLUSTER_TOP_N)
         try:
             results, suggestions, notes = Search.search(
                 q, interactive=False, weighting=weighting, use_champion=self.champion is not None,
-                top_k=top, apply_suggestions=apply_suggestions)
+                top_k=search_top, apply_suggestions=apply_suggestions)
             use_feedback = bool(rel_ids or nonrel_ids)
             if use_feedback:
                 results, added = rocchio_rerank(q, suggestions, apply_suggestions, rel_ids, nonrel_ids)
@@ -194,7 +254,7 @@ class App:
         parts = []
         if use_feedback:
             added_text = "、".join(html.escape(t) for t, _ in added) or "(無)"
-            clear = search_url(q, weighting, top, apply_suggestions)
+            clear = self.view_url(q, weighting, top, cm, k, None, apply_suggestions, cx)  # 清掉回饋後結果清單不同，不帶 cl
             parts.append(f"<div class='notice'>相關回饋 (Rocchio α={ROCCHIO_ALPHA}, β={ROCCHIO_BETA}, γ={ROCCHIO_GAMMA})："
                          f"👍 {len(rel_ids)} 篇、👎 {len(nonrel_ids)} 篇，以 tfidf cosine 重新排序。"
                          f"加入權重最高的詞：{added_text} — <a href='{html.escape(clear)}'>清除回饋</a></div>")
@@ -205,60 +265,138 @@ class App:
             if apply_suggestions:
                 parts.append(f"<div class='notice'>已套用拼字建議：{lines}</div>")
             else:
-                link = search_url(q, weighting, top, True, rel_ids, nonrel_ids)
+                link = self.view_url(q, weighting, top, cm, k, apply=True, cx=cx,
+                                     rel_ids=rel_ids, nonrel_ids=nonrel_ids)
                 parts.append(f"<div class='notice'>拼字建議：{lines} — <a href='{html.escape(link)}'>改用第一個建議搜尋</a></div>")
 
-        if use_feedback:
+        terms = query_terms_for_highlight(q, suggestions)
+        # 分群：只對排名前 CLUSTER_TOP_N 篇做 (顯示筆數不影響分群範圍)
+        analysis, surface, selected, no_structure_notice, signature = None, {}, None, "", None
+        if cm != CLUSTER_OFF and results:
+            if clustering.is_ready():
+                context_kwargs = {}
+                if cx == CONTEXT_QUERY:             # 只取查詢詞前後文分群：需要文件內文 (WARC 摘要資料)
+                    if self.store.ready:
+                        # 前後文要用實際拿去計分的詞 (含是否套用拼字建議)；terms 含未套用的建議，只用來標示
+                        scored = scoring_terms(q, suggestions, apply_suggestions)[0]
+                        # store 已就緒時，WARC 裡沒有的文件是「永遠不存在」，給空字串當沒有命中 (None 代表還取不到內文，不快取)
+                        context_kwargs = dict(query_terms=frozenset(scored),
+                                              get_text=lambda d: (self.store.get(d) or (None, ""))[1])
+                    else:
+                        parts.append("<div class='notice'>前後文分群需要文件內文 (WARC 還在掃描)，這次先用整頁分群。</div>")
+                analysis = clustering.analyze([doc_id for doc_id, _ in results[:CLUSTER_TOP_N]], cm, k, **context_kwargs)
+                if analysis["no_structure"]:        # 分不出明顯的群：不畫側欄與散佈圖，只在結果上方提示
+                    no_structure_notice = clustering.render_no_structure(analysis)
+                    analysis = None
+                else:
+                    surface = clustering.surface_forms(
+                        analysis, lambda d: (self.store.get(d) or (None, None))[1] if self.store.ready else None)
+                    signature = cluster_signature(analysis)
+                    # (1) cl 只在產生它的那次分群裡有意義：簽章對不上 (結果清單或分群方式變了) 就忽略
+                    if cl is not None and cs == signature and 0 <= cl < len(analysis["clusters"]):
+                        selected = cl
+            else:
+                parts.append("<div class='notice'>分群功能準備中 (正在建立文件向量)，稍後重新整理即可。</div>")
+
+        if use_feedback:                    # rocchio_rerank 一律用精確的 tfidf cosine，權重方案與 champion list 都沒用到
             mode = "tfidf cosine + Rocchio 回饋"
         else:
             mode = weighting + ("，champion list 近似計分" if self.champion is not None else "")
-        parts.append(f"<div class='meta'>命中 {len(results):,} 篇，顯示前 {min(top, len(results))} 名 · "
+        if selected is not None:
+            shown = analysis["clusters"][selected]["doc_ids"]
+            shown_text = f"群 {selected} 的 {len(shown)} 篇"
+        else:
+            shown = [doc_id for doc_id, _ in results[:top]]
+            shown_text = f"顯示前 {min(top, len(results))} 名"
+        parts.append(f"<div class='meta'>命中 {len(results):,} 篇，{shown_text} · "
                      f"{mode} · {elapsed:.0f} ms</div>")
+        parts.append(no_structure_notice)
         if not results:
             parts.append("<div class='empty'>找不到符合的搜尋結果。</div>")
             return "".join(parts)
 
-        # 結果列表包在回饋表單裡：勾 👍／👎 後按按鈕，標記以 rel / nonrel 參數帶到網址，可多輪累積
-        hidden = "".join(f"<input type='hidden' name='{k}' value='{html.escape(str(v), quote=True)}'>"
-                         for k, v in (("q", q), ("weighting", weighting), ("top", top)))
-        hidden += "<input type='hidden' name='apply' value='1'>" if apply_suggestions else ""
-        # 已標記但不在這頁的文件 (被 Rocchio 擠出前 top 名) 沒有勾選框，用 hidden 帶著，下一輪才不會遺失
-        shown = {doc_id for doc_id, _ in results[:top]}
-        kept = [(k, d) for k, ids in (("rel", rel_ids), ("nonrel", nonrel_ids)) for d in ids if d not in shown]
-        hidden += "".join(f"<input type='hidden' name='{k}' value='{html.escape(d, quote=True)}'>" for k, d in kept)
+        scores = dict(results[:max(top, CLUSTER_TOP_N)])
+        rank_of = {doc_id: rank for rank, (doc_id, _) in enumerate(results[:max(top, CLUSTER_TOP_N)], 1)}
+
+        def doc_link(doc_id):
+            back = self.view_url(q, weighting, top, cm, k, selected, apply_suggestions, cx,
+                                 rel_ids, nonrel_ids, signature)
+            link = f"/doc?id={requests_quote(doc_id)}&q={requests_quote(q)}"
+            if apply_suggestions:
+                link += "&apply=1"
+            return f"{link}&ret={requests_quote(back)}"
+
+        rel_set, nonrel_set = set(rel_ids), set(nonrel_ids)
+        displayed = set(shown)
+        kept = [(name, doc_id) for name, ids in (("rel", rel_ids), ("nonrel", nonrel_ids))
+                for doc_id in ids if doc_id not in displayed]
+        hidden_values = [("q", q), ("weighting", weighting), ("top", top), ("cm", cm), ("cx", cx)]
+        if k is not None:
+            hidden_values.append(("k", k))
+        if selected is not None:
+            hidden_values.append(("cl", selected))
+            hidden_values.append(("cs", signature))
+        if apply_suggestions:
+            hidden_values.append(("apply", "1"))
+        hidden = "".join(
+            f"<input type='hidden' name='{name}' value='{html.escape(str(value), quote=True)}'>"
+            for name, value in hidden_values)
+        hidden += "".join(
+            f"<input type='hidden' name='{name}' value='{html.escape(doc_id, quote=True)}'>"
+            for name, doc_id in kept)
         kept_note = f" · 另有 {len(kept)} 篇已標記的文件不在這頁，標記會保留" if kept else ""
         submit = ("<div class='fbbar'><button type='submit'>依回饋重新搜尋</button> "
                   f"<span class='meta'>勾選 👍 相關／👎 不相關的結果{kept_note}</span></div>")
-        parts.append(f"<form class='feedback' action='/' method='get'>{hidden}{submit}")
-        rel_set, nonrel_set = set(rel_ids), set(nonrel_ids)
-        terms = query_terms_for_highlight(q, suggestions)
-        state = search_url(q, weighting, top, apply_suggestions, rel_ids, nonrel_ids)[2:]  # 去掉開頭的 "/?"
-        for rank, (doc_id, score) in enumerate(results[:top], 1):
+        form_start = f"<form class='feedback' action='/' method='get'>{hidden}{submit}"
+
+        cards = []
+        for doc_id in shown:
+            rank, score = rank_of[doc_id], scores[doc_id]
             doc = self.store.get(doc_id) if self.store.ready else None
-            title = (doc[0] if doc and doc[0] else doc_id)
+            title = doc[0] if doc and doc[0] else doc_id
             snippet = make_snippet(doc[1], terms) if doc else ""
-            link = f"/doc?id={requests_quote(doc_id)}&{state}"
+            style, chip, css = "", "", ""
+            info = clustering.doc_cluster_info(analysis, doc_id, surface) if analysis else None
+            if info:
+                cluster_id, color, label = info
+                style, css = f" style='border-left-color:{color}'", " clustered"
+                chip = f"<span class='chip'>群 {cluster_id}：{html.escape(label)}</span>"
             value = html.escape(doc_id, quote=True)
             votes = (f"<span class='votes'>"
-                     f"<label title='相關'><input type='checkbox' name='rel' value='{value}'{' checked' if doc_id in rel_set else ''}>👍</label>"
-                     f"<label title='不相關'><input type='checkbox' name='nonrel' value='{value}'{' checked' if doc_id in nonrel_set else ''}>👎</label></span>")
-            parts.append(
-                f"<div class='result'><span class='score'>{score:.6f}</span>"
-                f"<div class='title'>{rank}. <a href='{html.escape(link)}'>{highlight(title[:120], terms)}</a></div>"
-                f"<div class='id'>{html.escape(doc_id)}{votes}</div>"
+                     f"<label title='相關'><input type='checkbox' name='rel' value='{value}'"
+                     f"{' checked' if doc_id in rel_set else ''}>👍</label>"
+                     f"<label title='不相關'><input type='checkbox' name='nonrel' value='{value}'"
+                     f"{' checked' if doc_id in nonrel_set else ''}>👎</label></span>")
+            cards.append(
+                f"<div class='result{css}'{style}><span class='score'>{score:.6f}</span>"
+                f"<div class='title'>{rank}. <a href='{html.escape(doc_link(doc_id))}'>{highlight(title[:120], terms)}</a></div>"
+                f"<div class='id'>{html.escape(doc_id)}{chip}{votes}</div>"
                 + (f"<div class='snippet'>{snippet}</div>" if snippet else "") + "</div>")
-        parts.append(f"{submit}</form>{VOTE_SCRIPT}")
         if not self.store.ready:
-            parts.append("<div class='meta'>(" + ("摘要尚未準備好：正在掃描 WARC 檔，稍後重新整理即可。" if self.store.available
-                                                    else "找不到 WARC 檔，因此不顯示摘要。") + ")</div>")
-        return "".join(parts)
+            cards.append("<div class='meta'>(" + ("摘要尚未準備好：正在掃描 WARC 檔，稍後重新整理即可。" if self.store.available
+                                                else "找不到 WARC 檔，因此不顯示摘要。") + ")</div>")
+        form_end = f"{submit}</form>{VOTE_SCRIPT}"
+
+        if analysis is None or not analysis["clusters"]:
+            return "".join(parts) + form_start + "".join(cards) + form_end
+        sidebar = clustering.render_sidebar(
+            analysis,
+            lambda cluster_id: self.view_url(q, weighting, top, cm, k, cluster_id, apply_suggestions, cx,
+                                             rel_ids, nonrel_ids, signature),
+            selected, surface)
+        titles = {d: (self.store.get(d) or ("", ""))[0] for d in analysis["assignment"]} if self.store.ready else {}
+        plot = clustering.render_scatter(analysis, doc_link, selected, titles, rank_of, surface)
+        return "".join(parts) + f"<div class='layout'>{sidebar}<section>{plot}{form_start}{''.join(cards)}{form_end}</section></div>"
 
     def document(self, params):
         doc_id = params.get("id", [""])[0]
         q = params.get("q", [""])[0]
         doc = self.store.get(doc_id) if self.store.ready else None
-        # 回搜尋結果時帶回原本的權重方案、top、拼字建議與回饋標記 (除了 id 以外的參數原樣帶回)
-        back = "/?" + urlencode([(k, v) for k, values in params.items() if k != "id" for v in values], quote_via=quote)
+        ret = params.get("ret", [""])[0]
+        # 優先回到結果原有狀態；只接受站內的 /?... 網址。
+        back = ret if ret.startswith("/?") else "/?" + urlencode(
+            [(key, value) for key, values in params.items() if key not in {"id", "ret"} for value in values],
+            quote_via=quote)
         if doc is None:
             return page("找不到文件", f"<p><a href='{html.escape(back)}'>← 回搜尋結果</a></p><div class='empty'>找不到文件 {html.escape(doc_id)} 的內容。</div>")
         suggestions = {}
@@ -275,17 +413,15 @@ class App:
                     f"<div class='id sub'>{html.escape(doc_id)}</div>{cut}<div class='fulltext'>{highlight(text, terms)}</div>")
 
 
+def cluster_signature(analysis):
+    """一次分群結果的簽章 (文件 -> 群編號的對應)：群編號只在同一次分群裡有意義，網址帶著它，
+    之後結果清單或分群方式變了就對不上，這時忽略網址上的群編號。"""
+    items = sorted(analysis["assignment"].items())
+    return hashlib.md5(repr(items).encode("utf-8")).hexdigest()[:10]
+
+
 def requests_quote(value):
     return quote(value, safe="")
-
-
-def search_url(q, weighting, top, apply_suggestions=False, rel_ids=(), nonrel_ids=()):
-    """搜尋結果頁的網址，帶上全部狀態 (權重方案、top、拼字建議、回饋標記)。"""
-    pairs = [("q", q), ("weighting", weighting), ("top", top)]
-    if apply_suggestions:
-        pairs.append(("apply", "1"))
-    pairs += [("rel", d) for d in rel_ids] + [("nonrel", d) for d in nonrel_ids]
-    return "/?" + urlencode(pairs, quote_via=quote)
 
 
 def make_handler(app):
@@ -331,6 +467,13 @@ if __name__ == "__main__":
     if args.champion is not None:
         count = Search.build_champion_lists(args.champion, args.weighting)
         print(f"champion list 建立完成：{count} 個詞 (每個保留貢獻最大的 {args.champion} 篇)")
+
+    if not hasattr(Search, "get_doc_vector"):   # 還沒有 get_doc_vector 時，先在背景建好分群用的文件矩陣
+        def build_cluster_matrix():
+            started = time.perf_counter()
+            clustering.build_doc_matrix()
+            print(f"分群用的文件向量建立完成 ({time.perf_counter() - started:.1f} 秒)")
+        threading.Thread(target=build_cluster_matrix, daemon=True).start()
 
     store = DocStore(WARC_FILE_PATH)
     if store.available:
