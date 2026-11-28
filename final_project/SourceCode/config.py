@@ -44,6 +44,11 @@ ROCCHIO_ALPHA = 1.0  # 原始查詢向量權重
 ROCCHIO_BETA = 0.75  # 相關文件向量權重
 ROCCHIO_GAMMA = 0.15 # 不相關文件向量權重
 
+# prf 設定參數
+PRF_DOCS = 10          # 虛擬相關回饋預設取前幾篇當相關文件
+PRF_MAX_VEC_TERMS = 50  # 改寫後查詢向量最多保留幾個詞
+PRF_MAX_DF_RATIO = 0.05  # 排除 df 佔比超過此值的詞 (避免雜訊詞)
+
 # 盲目相關回饋 (PRF) 擴展詞數量
 EXPAND_TERMS_M = 5
 
