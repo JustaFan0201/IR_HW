@@ -14,7 +14,7 @@ import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import Search
 import feedback
@@ -193,7 +193,7 @@ class App:
         parts = []
         if use_feedback:
             added_text = "、".join(html.escape(t) for t, _ in added) or "(無)"
-            clear = f"/?q={requests_quote(q)}&weighting={weighting}&top={top}" + ("&apply=1" if apply_suggestions else "")
+            clear = search_url(q, weighting, top, apply_suggestions)
             parts.append(f"<div class='notice'>相關回饋 (Rocchio α={ROCCHIO_ALPHA}, β={ROCCHIO_BETA}, γ={ROCCHIO_GAMMA})："
                          f"👍 {len(rel_ids)} 篇、👎 {len(nonrel_ids)} 篇，以 tfidf cosine 重新排序。"
                          f"加入權重最高的詞：{added_text} — <a href='{html.escape(clear)}'>清除回饋</a></div>")
@@ -204,7 +204,7 @@ class App:
             if apply_suggestions:
                 parts.append(f"<div class='notice'>已套用拼字建議：{lines}</div>")
             else:
-                link = f"/?q={requests_quote(q)}&weighting={weighting}&top={top}&apply=1"
+                link = search_url(q, weighting, top, True, rel_ids, nonrel_ids)
                 parts.append(f"<div class='notice'>拼字建議：{lines} — <a href='{html.escape(link)}'>改用第一個建議搜尋</a></div>")
 
         if use_feedback:
@@ -221,15 +221,22 @@ class App:
         hidden = "".join(f"<input type='hidden' name='{k}' value='{html.escape(str(v), quote=True)}'>"
                          for k, v in (("q", q), ("weighting", weighting), ("top", top)))
         hidden += "<input type='hidden' name='apply' value='1'>" if apply_suggestions else ""
-        submit = "<div class='fbbar'><button type='submit'>依回饋重新搜尋</button> <span class='meta'>勾選 👍 相關／👎 不相關的結果</span></div>"
+        # 已標記但不在這頁的文件 (被 Rocchio 擠出前 top 名) 沒有勾選框，用 hidden 帶著，下一輪才不會遺失
+        shown = {doc_id for doc_id, _ in results[:top]}
+        kept = [(k, d) for k, ids in (("rel", rel_ids), ("nonrel", nonrel_ids)) for d in ids if d not in shown]
+        hidden += "".join(f"<input type='hidden' name='{k}' value='{html.escape(d, quote=True)}'>" for k, d in kept)
+        kept_note = f" · 另有 {len(kept)} 篇已標記的文件不在這頁，標記會保留" if kept else ""
+        submit = ("<div class='fbbar'><button type='submit'>依回饋重新搜尋</button> "
+                  f"<span class='meta'>勾選 👍 相關／👎 不相關的結果{kept_note}</span></div>")
         parts.append(f"<form class='feedback' action='/' method='get'>{hidden}{submit}")
         rel_set, nonrel_set = set(rel_ids), set(nonrel_ids)
         terms = query_terms_for_highlight(q, suggestions)
+        state = search_url(q, weighting, top, apply_suggestions, rel_ids, nonrel_ids)[2:]  # 去掉開頭的 "/?"
         for rank, (doc_id, score) in enumerate(results[:top], 1):
             doc = self.store.get(doc_id) if self.store.ready else None
             title = (doc[0] if doc and doc[0] else doc_id)
             snippet = make_snippet(doc[1], terms) if doc else ""
-            link = f"/doc?id={requests_quote(doc_id)}&q={requests_quote(q)}" + ("&apply=1" if apply_suggestions else "")
+            link = f"/doc?id={requests_quote(doc_id)}&{state}"
             value = html.escape(doc_id, quote=True)
             votes = (f"<span class='votes'>"
                      f"<label title='相關'><input type='checkbox' name='rel' value='{value}'{' checked' if doc_id in rel_set else ''}>👍</label>"
@@ -249,7 +256,8 @@ class App:
         doc_id = params.get("id", [""])[0]
         q = params.get("q", [""])[0]
         doc = self.store.get(doc_id) if self.store.ready else None
-        back = f"/?q={requests_quote(q)}"
+        # 回搜尋結果時帶回原本的權重方案、top、拼字建議與回饋標記 (除了 id 以外的參數原樣帶回)
+        back = "/?" + urlencode([(k, v) for k, values in params.items() if k != "id" for v in values], quote_via=quote)
         if doc is None:
             return page("找不到文件", f"<p><a href='{html.escape(back)}'>← 回搜尋結果</a></p><div class='empty'>找不到文件 {html.escape(doc_id)} 的內容。</div>")
         suggestions = {}
@@ -267,8 +275,16 @@ class App:
 
 
 def requests_quote(value):
-    from urllib.parse import quote
     return quote(value, safe="")
+
+
+def search_url(q, weighting, top, apply_suggestions=False, rel_ids=(), nonrel_ids=()):
+    """搜尋結果頁的網址，帶上全部狀態 (權重方案、top、拼字建議、回饋標記)。"""
+    pairs = [("q", q), ("weighting", weighting), ("top", top)]
+    if apply_suggestions:
+        pairs.append(("apply", "1"))
+    pairs += [("rel", d) for d in rel_ids] + [("nonrel", d) for d in nonrel_ids]
+    return "/?" + urlencode(pairs, quote_via=quote)
 
 
 def make_handler(app):
