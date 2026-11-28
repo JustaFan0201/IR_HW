@@ -1,0 +1,26 @@
+# qid<TAB>查詢<TAB>類型 (ambiguous=多義詞、synonym=文件可能用不同說法、general=一般主題)
+Q01	java	ambiguous
+Q02	jaguar	ambiguous
+Q03	apple	ambiguous
+Q04	mercury	ambiguous
+Q05	python	ambiguous
+Q06	automobile repair	synonym
+Q07	cheap airline tickets	synonym
+Q08	physician directory	synonym
+Q09	attorney legal advice	synonym
+Q10	college scholarship	synonym
+Q11	movie reviews	synonym
+Q12	mobile phone plans	synonym
+Q13	home mortgage rates	synonym
+Q14	health insurance plans	general
+Q15	hotel reservations	general
+Q16	chicken recipes	general
+Q17	job search resume	general
+Q18	digital camera reviews	general
+Q19	real estate listings	general
+Q20	weather forecast	general
+Q21	learn spanish online	general
+Q22	cancer research treatment	general
+Q23	university admission requirements	general
+Q24	video games download	general
+Q25	tax return filing	general
