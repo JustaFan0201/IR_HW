@@ -83,17 +83,37 @@ def prf(query: str, k: int = TOP_K, fb_docs: int = PRF_DOCS,
     回傳前 k 篇 [(docID, score)]。
 
     k：最終回傳的篇數 (供 METHODS 介面呼叫，與回饋文件數無關)。
-    fb_docs：當作虛擬相關文件的篇數 (PRF 慣例取少量，預設見 config.PRF_DOCS)。
-    max_vec_terms：Rocchio 算出的新向量，扣掉原查詢詞後最多再保留幾個擴展詞。
+    fb_docs：當作虛擬相關文件的篇數 (PRF 慣例取少量，預設見 config.PRF_DOCS)；
+    <= 0 時視為不做回饋，直接回傳第一輪搜尋結果的前 k 篇。
+    max_vec_terms：改寫後的查詢向量 (含原查詢詞) 總詞數上限，避免向量過大拖慢排序。
     max_df_ratio：排除 df 佔總文件數比例超過此值的擴展詞 (太常見/雜訊詞)；
     原查詢詞不受此限制，一律保留，避免 query drift。
+
+    查詢語法錯誤、只含停用詞、只有 NOT、或萬用字元沒有符合的詞時，
+    不會拋出例外，直接回傳 []。
     """
-    initial_results, _, _ = S.search(query, interactive=False, top_k=fb_docs)
+    try:
+        boolean_expression = S.parse_boolean_query(query)
+        if boolean_expression is not None:
+            query_terms = S.get_boolean_terms(boolean_expression)
+            allowed_doc_ids = S.evaluate_boolean_query(boolean_expression)
+        else:
+            query_terms = analyze(query)
+            allowed_doc_ids = None
+        if not query_terms:
+            return []
+
+        initial_results = S.rank_documents(query_terms, allowed_doc_ids, min_results=max(k, fb_docs))
+    except ValueError:
+        return []
+
+    if fb_docs <= 0:
+        return initial_results[:k]
+
     top_ids = [doc_id for doc_id, _ in initial_results[:fb_docs]]
     if not top_ids:
         return []
 
-    query_terms = analyze(query)
     query_vec = S.query_vector(query_terms)
     new_query_vec = rocchio(query_vec, rel_ids=top_ids, nonrel_ids=[])
 
@@ -105,7 +125,7 @@ def prf(query: str, k: int = TOP_K, fb_docs: int = PRF_DOCS,
         if t in orig_terms or (t in S.inverted_index and S.inverted_index[t]["df"] <= max_df)
     }
 
-    # 截斷前 max_vec_terms 個詞：原查詢詞不參與排名、直接保留，剩餘名額才給擴展詞依權重競爭
+    # 截斷總詞數到 max_vec_terms：原查詢詞不參與排名、直接保留，剩餘名額才給擴展詞依權重競爭
     if len(filtered) > max_vec_terms:
         protected = {t: w for t, w in filtered.items() if t in orig_terms}
         expandable = {t: w for t, w in filtered.items() if t not in orig_terms}
@@ -113,6 +133,6 @@ def prf(query: str, k: int = TOP_K, fb_docs: int = PRF_DOCS,
         top_expandable = sorted(expandable.items(), key=lambda x: x[1], reverse=True)[:remaining_slots]
         filtered = {**protected, **dict(top_expandable)}
 
-    return S.rank_by_vector(filtered)[:k]
+    return S.rank_by_vector(filtered, allowed_doc_ids=allowed_doc_ids)[:k]
 
 METHODS = {"prf": prf}
