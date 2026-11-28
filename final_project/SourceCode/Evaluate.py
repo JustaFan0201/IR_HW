@@ -20,7 +20,10 @@
 qrels 檔格式是 TREC 標準：每行 `qid 0 docID rel`。
 """
 import math
+import os
 import random
+import re
+import sys
 from collections import defaultdict
 
 MAP_DEPTH = 100
@@ -29,30 +32,56 @@ MAP_DEPTH = 100
 # ---------------------------------------------------------------- 檔案讀寫
 
 def load_qrels(path):
+    """讀 qrels。空行與 # 開頭的行略過；格式不對的行會印警告 (含行號)，不會默默丟掉標註。"""
     qrels = defaultdict(dict)
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for number, line in enumerate(f, 1):
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
             parts = line.split()
-            if len(parts) == 4 and not line.startswith("#"):
+            if len(parts) == 4 and parts[3].lstrip("-").isdigit():
                 qid, _, doc_id, rel = parts
                 qrels[qid][doc_id] = int(rel)
+            else:
+                print(f"[警告] {path} 第 {number} 行格式不對，已略過 (應為 `qid 0 docID rel`)：{line.strip()[:80]}",
+                      file=sys.stderr)
     return dict(qrels)
 
 
 def append_qrel(path, qid, doc_id, rel):
+    """附加一行標註。檔案結尾不是換行 (例如手動編輯後沒按 Enter) 時先補一個，避免兩行黏在一起。"""
+    needs_newline = False
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        with open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            needs_newline = f.read(1) not in (b"\n", b"\r")
     with open(path, "a", encoding="utf-8") as f:
-        f.write(f"{qid} 0 {doc_id} {rel}\n")
+        f.write(("\n" if needs_newline else "") + f"{qid} 0 {doc_id} {rel}\n")
 
 
 def load_queries(path):
-    """eval_queries.txt：`qid<TAB>查詢<TAB>類型`，回傳 [(qid, query, type)]。# 開頭為註解。"""
+    """eval_queries.txt：`qid<TAB>查詢<TAB>類型`，回傳 [(qid, query, type)]。# 開頭為註解。
+    編輯器把 tab 轉成空格時，兩個以上連續空白也當分隔；兩種都切不開就指出是第幾行。"""
     queries = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
-            if line.strip() and not line.startswith("#"):
-                parts = line.rstrip("\n").split("\t")
-                queries.append((parts[0], parts[1], parts[2] if len(parts) > 2 else ""))
+        for number, line in enumerate(f, 1):
+            line = line.rstrip("\r\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            parts = line.split("\t") if "\t" in line else re.split(r" {2,}", line.strip())
+            parts = [p.strip() for p in parts]
+            if len(parts) < 2 or not parts[0] or not parts[1]:
+                sys.exit(f"{path} 第 {number} 行格式不對 (應為 `qid<TAB>查詢<TAB>類型`，用 tab 分隔)：{line!r}")
+            queries.append((parts[0], parts[1], parts[2] if len(parts) > 2 else ""))
     return queries
+
+
+def split_item(item):
+    """排序結果的一筆 -> (docID, score)。接受 (doc, score) tuple、[doc, score] list、
+    numpy 的列，或單純的 docID 字串。"""
+    if isinstance(item, str):
+        return item, 0.0
+    return str(item[0]), float(item[1]) if len(item) > 1 else 0.0
 
 
 def write_run(path, run, name):
@@ -60,14 +89,14 @@ def write_run(path, run, name):
     with open(path, "w", encoding="utf-8") as f:
         for qid, ranked in run.items():
             for rank, item in enumerate(ranked, 1):
-                doc_id, score = item if isinstance(item, tuple) else (item, 0.0)
+                doc_id, score = split_item(item)
                 f.write(f"{qid} Q0 {doc_id} {rank} {score:.6f} {name}\n")
 
 
 # ---------------------------------------------------------------- 單一查詢的指標
 
 def _doc_ids(ranked):
-    return [item[0] if isinstance(item, tuple) else item for item in ranked]
+    return [split_item(item)[0] for item in ranked]
 
 
 def precision_at_k(ranked, judgments, k=10):
@@ -158,6 +187,7 @@ if __name__ == "__main__":
     assert unjudged_at_k(run, j, 5) == 2 / 5
     res = evaluate({"q": run}, {"q": j}, k=5)
     assert abs(res["nDCG@5"] - dcg / idcg) < 1e-9
+    assert _doc_ids([["a", 0.9], ("b", 0.5), "c"]) == ["a", "b", "c"]     # list / tuple / 純 docID 都能處理
     # run 缺少的查詢要算 0 分，不能被排除在平均之外
     res = evaluate({"q1": run}, {"q1": j, "q2": {"z": 1}}, k=5)
     assert abs(res["P@5"] - (3 / 5 + 0.0) / 2) < 1e-9

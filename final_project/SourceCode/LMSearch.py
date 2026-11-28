@@ -41,15 +41,15 @@ def _collection_freq(term):
 def positive_float(value):
     """argparse 用：只接受大於 0 的數字 (mu = 0 會除以零)。"""
     number = float(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError(f"mu 必須大於 0，收到 {value}")
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError(f"mu 必須是大於 0 的有限數字，收到 {value}")
     return number
 
 
 def rank_lm(query_terms, mu=DEFAULT_MU, allowed_doc_ids=None):
     """回傳 [(docID, score)]，分數高到低。不在索引中的查詢詞直接略過。mu 必須大於 0。"""
-    if mu <= 0:
-        raise ValueError(f"Dirichlet 平滑參數 mu 必須大於 0，收到 {mu}")
+    if not math.isfinite(mu) or mu <= 0:
+        raise ValueError(f"Dirichlet 平滑參數 mu 必須是大於 0 的有限數字，收到 {mu}")
     counts = Counter(t for t in query_terms if t in S.inverted_index)
     if not counts:
         return []

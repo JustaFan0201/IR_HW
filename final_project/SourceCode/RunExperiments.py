@@ -1,7 +1,7 @@
 """比較各排序方案：P@10、MAP、nDCG@10。模組 D。
 
     python SourceCode/RunExperiments.py                                  # baseline：tfidf、tfidf-raw、bm25、lm
-    python SourceCode/RunExperiments.py --plugins semantic feedback  # 加入 A、C 的方法 (模組檔名，不含 .py)
+    python SourceCode/RunExperiments.py --plugins semantic  # 加入 C 的方法 (模組檔名，不含 .py；A 的 feedback 加上 METHODS 後再加)
     python SourceCode/RunExperiments.py --methods bm25 lm --baseline bm25
     python SourceCode/RunExperiments.py --sweep-mu 100 500 1000 2000 5000 # 語言模型的 mu 掃描
 
@@ -89,6 +89,8 @@ def main():
     qrels = load_qrels(args.qrels) if os.path.exists(args.qrels) else {}
     types = {qid: qtype for qid, _, qtype in queries}
     judged = [qid for qid, _, _ in queries if any(r >= 1 for r in qrels.get(qid, {}).values())]
+    # 只評估查詢檔裡的查詢：用 --queries 指定調參組/測試組時，qrels 裡其他組的 qid 不能被算成 0 分
+    qrels = {qid: qrels[qid] for qid in judged}
     print(f"{len(queries)} 個查詢，其中 {len(judged)} 個有相關文件標註 (只有這些會納入平均)")
     if not judged:
         raise SystemExit(f"還沒有標註資料 (找不到或沒有相關文件：{args.qrels})。"
@@ -164,7 +166,7 @@ def main():
                                 f"{m['nDCG@10']:.4f}", f"{m['Unjudged@10']:.2f}"])
 
     # ---- 顯著性 (nDCG@10，對 baseline)
-    if baseline:
+    if baseline and len(names) > 1:
         print(f"\n對 {baseline} 的 nDCG@10 差異 (配對隨機化檢定；只有 {len(judged)} 個查詢，p 值僅供參考)：")
         base = {q: m["nDCG@10"] for q, m in per_query[baseline].items()}
         rows = []

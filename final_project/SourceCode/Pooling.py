@@ -51,7 +51,10 @@ def build_pool(queries, method_names, depth):
 def _doc_store():
     """嘗試讀 WARC 以顯示標題與摘要；找不到檔案時回傳 None (標註時只看得到文件編號)。"""
     from config import WARC_FILE_PATH
-    from WebApp import DocStore
+    try:
+        from docs import DocStore       # main 上 DocStore 已搬到 docs.py (不必載入整個網頁模組)
+    except ImportError:
+        from WebApp import DocStore     # 舊版 (DocStore 還在 WebApp.py)
     store = DocStore(WARC_FILE_PATH)
     if not store.available:
         print(f"[提醒] 找不到 WARC 檔 {WARC_FILE_PATH}，沒有標題與內文可看，無法標註。")
@@ -202,13 +205,17 @@ def main():
     args = parser.parse_args()
 
     queries = load_queries(QUERIES_PATH)
-    if args.queries:                # 所有子指令 (annotate / export / status) 都只處理指定的 qid
+    if args.command == "merge":     # merge 不套用 --queries：CSV 裡所有查詢的標註都要收進來
+        if args.queries:
+            print("[提醒] merge 會合併 CSV 中全部查詢的標註，--queries 在這裡沒有作用。")
+        return cmd_merge(args, queries)
+    if args.queries:                # annotate / export / status 只處理指定的 qid
         unknown_ids = [q for q in args.queries if q not in {qid for qid, _, _ in queries}]
         if unknown_ids:
             sys.exit(f"--queries 中有不存在的 qid：{unknown_ids}")
         queries = [item for item in queries if item[0] in args.queries]
-    if args.command in ("merge", "status"):
-        return {"merge": cmd_merge, "status": cmd_status}[args.command](args, queries)
+    if args.command == "status":
+        return cmd_status(args, queries)
 
     S.load_index()
     Methods.load_plugins(args.plugins)

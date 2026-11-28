@@ -10,7 +10,7 @@ A、C 的方法不用改這個檔案。在自己的模組裡放一個 `METHODS =
     def hybrid(query, k): ...
     METHODS = {"semantic": lambda q, k: semantic_search(q, k), "hybrid": hybrid}
 
-    python SourceCode/RunExperiments.py --plugins semantic feedback
+    python SourceCode/RunExperiments.py --plugins semantic            # A 的 feedback.py 加上 METHODS 後再加 feedback
 
 載入失敗 (找不到模組、模組沒有 METHODS) 會直接報錯結束，不會默默只跑 baseline。
 過渡期：模組若還沒有 METHODS 但有 TASKS.md 約定的 `semantic_search(query, k)`，
@@ -20,13 +20,17 @@ import importlib
 import sys
 
 import Search as S
+from Evaluate import split_item
 from LMSearch import DEFAULT_MU, search_lm
 
 METHODS = {}
 
 
 def register(name, fn):
-    METHODS[name] = fn
+    """註冊方法；回傳值統一轉成 [(str(docID), float(score))]，plugin 回傳 list / numpy 列也沒問題。"""
+    def normalized(query, k):
+        return [split_item(item) for item in fn(query, k)]
+    METHODS[name] = normalized
 
 
 def _vsm(weighting):
