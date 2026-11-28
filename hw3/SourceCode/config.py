@@ -37,3 +37,6 @@ BM25_B = 0.75
 
 # 萬用字元 (*) 展開後最多保留幾個索引詞 (取 df 最高者)，避免 a* 這類查詢展開成數萬個詞
 WILDCARD_MAX_TERMS = 50
+
+# 模型名稱
+DEFAULT_MODEL = "llama3.2"
